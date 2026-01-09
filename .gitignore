@@ -217,5 +217,6 @@ __marimo__/
 
 .claude
 .history
-build
-build_check
+build*
+
+*.avi

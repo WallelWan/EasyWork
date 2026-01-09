@@ -9,11 +9,11 @@ import easywork as ew
 class FaceDetectApp(ew.Pipeline):
     def __init__(self):
         super().__init__()
-        # 1. Define Nodes (Implicitly registered)
-        self.cam = ew.Camera(device_id=-1, limit=15)
+        # 使用新的统一 API (工厂模式)
+        self.cam = ew.module.CameraSource(device_id=-1)
         self.processor = ew.PyFunc(self.process_frame)
-        self.writer = ew.VideoWriter("class_output.avi")
-        self.sink = ew.NullSink() # Just to show branching
+        self.writer = ew.module.VideoWriterSink("class_output.avi")
+        self.sink = ew.module.NullSink() # Just to show branching
 
     def process_frame(self, frame):
         # User logic
@@ -25,21 +25,21 @@ class FaceDetectApp(ew.Pipeline):
         return frame
 
     def construct(self):
-        # 2. Define Topology (The "Forward" pass)
+        # 定义拓扑 (The "Forward" pass)
         x = self.cam.read()
-        
-        # Call the processor node like a function!
+
+        # 像 PyTorch 一样调用处理器节点!
         y = self.processor(x)
-        
-        # Fork logic: Write to file AND send to null sink
+
+        # Fork logic: 写入文件并发送到 null sink
         self.writer.write(y)
         self.sink.consume(y)
 
 if __name__ == "__main__":
-    print("Initializing App (PyTorch Style)...")
+    print("Initializing App (C++20 Factory Pattern)...")
     app = FaceDetectApp()
-    
+
     print("Running App...")
     app.run()
-    
+
     print("Finished.")

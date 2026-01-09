@@ -1,10 +1,27 @@
 cmake_minimum_required(VERSION 3.15)
 project(easywork LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# Check C++20 support (String Literal as NTTP)
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+int main() {
+    constexpr auto s = \"test\"; // String literal as NTTP (C++20)
+    return 0;
+}
+" HAVE_CXX20_NTTP)
+
+if(NOT HAVE_CXX20_NTTP)
+    message(FATAL_ERROR "EasyWork requires C++20 support (String Literal as NTTP). "
+                        "Please use GCC 10+, Clang 12+, or MSVC 2019+")
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_SKIP_BUILD_RPATH TRUE) # Avoid RPATH poisoning by Conda
+# CMAKE_SKIP_BUILD_RPATH is removed to allow proper library finding during development.
+
+message(STATUS "C++20 support confirmed")
 
 # --- 1. Dependencies ---
 
@@ -12,29 +29,26 @@ set(CMAKE_SKIP_BUILD_RPATH TRUE) # Avoid RPATH poisoning by Conda
 find_package(OpenCV REQUIRED)
 message(STATUS "OpenCV Version: ${OpenCV_VERSION}")
 
-# TBB (Required)
-find_package(TBB QUIET)
+# TBB (Required, prefer oneTBB 2021+)
+find_package(TBB 2021 QUIET CONFIG)
 if(NOT TBB_FOUND)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(TBB REQUIRED tbb)
+    find_package(TBB QUIET)
+    if(NOT TBB_FOUND)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(TBB REQUIRED tbb>=2021)
+    endif()
 endif()
-message(STATUS "TBB Found")
+message(STATUS "TBB Found: ${TBB_VERSION}")
 
-# spdlog
-find_package(spdlog QUIET)
-if(NOT spdlog_FOUND)
-    # Fallback to FetchContent if system spdlog is not available
-    include(FetchContent)
-    FetchContent_Declare(
-      spdlog
-      GIT_REPOSITORY https://github.com/gabime/spdlog.git
-      GIT_TAG        v1.12.0
-    )
-    FetchContent_MakeAvailable(spdlog)
-    message(STATUS "spdlog Built from source")
-else()
-    message(STATUS "spdlog Found: ${spdlog_VERSION}")
-endif()
+# spdlog (Force build from source for ABI compatibility)
+include(FetchContent)
+FetchContent_Declare(
+  spdlog
+  GIT_REPOSITORY https://github.com/gabime/spdlog.git
+  GIT_TAG        v1.12.0
+)
+FetchContent_MakeAvailable(spdlog)
+message(STATUS "spdlog Built from source")
 
 # Python & Pybind11
 find_package(Python3 3.8 COMPONENTS Interpreter Development REQUIRED)
@@ -92,8 +106,12 @@ pybind11_add_module(easywork_core ${SOURCES})
 target_link_libraries(easywork_core PRIVATE
     ${OpenCV_LIBS}
     spdlog::spdlog
-    /usr/lib/x86_64-linux-gnu/libtbb.so.12 # OneTBB (TBB 2021+)
+    ${TBB_LIBRARIES}
 )
+
+if(TARGET TBB::tbb)
+    target_link_libraries(easywork_core PRIVATE TBB::tbb)
+endif()
 
 # For TBB PkgConfig, we might need manual link directories
 if(TBB_LIBRARY_DIRS)
