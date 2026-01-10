@@ -67,11 +67,30 @@ public:
     const std::vector<Node*>& get_upstreams() const { return upstreams_; }
 };
 
+namespace detail {
+// Helper trait to check if a type is std::tuple
+template <typename T> struct is_tuple_impl : std::false_type {};
+template <typename... Ts> struct is_tuple_impl<std::tuple<Ts...>> : std::true_type {};
+template <typename T> struct is_tuple : is_tuple_impl<std::decay_t<T>> {};
+template <typename T> inline constexpr bool is_tuple_v = is_tuple<T>::value;
+} // namespace detail
+
+// Forward declaration
+template<typename TupleT>
+bool RegisterTupleType();
+
 // ========== TypedInputNode (Source) ==========
 // 模板化的输入节点，支持任意输出类型
 template<typename Derived, typename OutputT>
 class TypedInputNode : public Node {
 public:
+    TypedInputNode() {
+        if constexpr (detail::is_tuple_v<OutputT>) {
+            static const bool _registered = RegisterTupleType<OutputT>();
+            (void)_registered;
+        }
+    }
+
     using OutputType = OutputT;
     std::unique_ptr<tbb::flow::input_node<Value>> tbb_node;
 
@@ -122,6 +141,13 @@ public:
 template<typename Derived, typename InputT, typename OutputT>
 class TypedFunctionNode : public Node {
 public:
+    TypedFunctionNode() {
+        if constexpr (detail::is_tuple_v<OutputT>) {
+            static const bool _registered = RegisterTupleType<OutputT>();
+            (void)_registered;
+        }
+    }
+
     using InputType = InputT;
     using OutputType = OutputT;
     std::unique_ptr<tbb::flow::function_node<Value, Value>> tbb_node;
@@ -281,6 +307,7 @@ public:
 };
 
 namespace detail {
+
 struct TupleRegistryEntry {
     size_t size;
     std::function<std::shared_ptr<Node>(size_t)> factory;

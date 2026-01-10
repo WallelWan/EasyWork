@@ -7,6 +7,8 @@
 #include <concepts>
 #include <functional>
 #include <algorithm>
+#include <tuple>
+#include <utility>
 #include <pybind11/pybind11.h>
 #include "core_tbb.h"
 
@@ -21,20 +23,8 @@ concept NodeType = std::derived_from<T, Node> && requires(ExecutionGraph& g) {
     { std::declval<T&>().get_type_info() } -> std::convertible_to<NodeTypeInfo>;
 };
 
-// 旧版本的 Concepts（暂时保留，后续会废弃）
-template<typename T>
-concept InputNodeType = NodeType<T> && std::derived_from<T, InputNode> && requires {
-    { std::declval<T&>().forward(std::declval<tbb::flow_control*>()) } -> std::convertible_to<Frame>;
-};
+// ========== Compile-time String Hashing ==========
 
-template<typename T>
-concept FunctionNodeType = NodeType<T> && std::derived_from<T, FunctionNode> && requires {
-    { std::declval<T&>().forward(std::declval<Frame>()) } -> std::convertible_to<Frame>;
-};
-
-// ========== Compile-time String Hashing (constexpr/consteval) ==========
-
-// FNV-1a hash algorithm (constexpr/consteval compatible)
 constexpr std::size_t hash_string(std::string_view str) noexcept {
     std::size_t hash = 14695981039346656037ULL;
     for (char c : str) {
@@ -51,14 +41,9 @@ struct StringLiteral {
     constexpr StringLiteral(const char (&str)[N]) {
         std::copy_n(str, N, value);
     }
-
     char value[N];
-
     constexpr std::size_t size() const { return N - 1; }
-
     constexpr std::string_view view() const { return std::string_view(value, N - 1); }
-
-    constexpr std::size_t hash() const { return hash_string(view()); }
 };
 
 // ========== Node Registry ==========
@@ -105,7 +90,7 @@ private:
     std::unordered_map<std::string, NodeCreator> creators_;
 };
 
-// ========== Parameter Extractor (Black Magic) ==========
+// ========== Parameter Extraction & Factory ==========
 
 namespace detail {
     // Extract parameter from args/kwargs with default value
@@ -128,9 +113,35 @@ namespace detail {
         }
         return default_val;
     }
+
+    // Helper: Create node using unpacked arguments
+    template<typename NodeT, size_t... I, typename Tuple>
+    std::shared_ptr<Node> CreateNodeWithArgsImpl(pybind11::args& args, pybind11::kwargs& kwargs,
+                                                 std::index_sequence<I...>, const Tuple& arg_defs) {
+        return std::make_shared<NodeT>(
+            extract_arg(args, kwargs, std::get<I>(arg_defs).name, I, std::get<I>(arg_defs).default_val)...
+        );
+    }
+
+    // Entry point: Takes variadic Args, packs them into a tuple, and delegates
+    template<typename NodeT, typename... Args>
+    std::shared_ptr<Node> CreateNodeWithArgs(pybind11::args args, pybind11::kwargs kwargs, Args... arg_defs) {
+        return CreateNodeWithArgsImpl<NodeT>(
+            args, kwargs, std::make_index_sequence<sizeof...(Args)>{}, std::make_tuple(arg_defs...)
+        );
+    }
 }
 
-// ========== Node Creator Impl (Template Specialization) ==========
+// ========== Argument Descriptor ==========
+
+template<typename T>
+struct Arg {
+    const char* name;
+    T default_val;
+    Arg(const char* n, T v) : name(n), default_val(v) {}
+};
+
+// ========== Node Creator Impl (Fallback for 0-args) ==========
 
 template<NodeType NodeT>
 struct NodeCreatorImpl {
@@ -138,17 +149,17 @@ struct NodeCreatorImpl {
         if constexpr (std::is_default_constructible_v<NodeT>) {
             return std::make_shared<NodeT>();
         } else {
-            static_assert(std::is_default_constructible_v<NodeT>,
-                "NodeType must be default constructible or use EW_REGISTER_NODE_ARGS macro");
+             throw std::runtime_error("Node requires parameters but none were provided in registration.");
         }
     }
 };
 
-// ========== Node Registrar (String Literal NTTP) ==========
+// ========== Node Registrar ==========
 
 template<StringLiteral Name, NodeType NodeT>
 class NodeRegistrar {
 public:
+    // Default constructor: Uses NodeCreatorImpl (for 0-arg nodes)
     NodeRegistrar() {
         NodeRegistry::instance().Register(
             Name.view(),
@@ -157,55 +168,24 @@ public:
             }
         );
     }
+
+    // Variadic constructor handles N-arg cases
+    template<typename... Args>
+    NodeRegistrar(Args... arg_defs) {
+        NodeRegistry::instance().Register(
+            Name.view(),
+            [=](pybind11::args args, pybind11::kwargs kwargs) -> std::shared_ptr<Node> {
+                return detail::CreateNodeWithArgs<NodeT>(args, kwargs, arg_defs...);
+            }
+        );
+    }
 };
 
-// ========== Registration Macros (Unified Interface) ==========
+// ========== Registration Macro ==========
 
-// For nodes with default constructor (0 parameters)
-#define EW_REGISTER_NODE(Classname, PyName) \
+// Unified macro: EW_REGISTER_NODE(Class, "Name", Arg(...), ...)
+#define EW_REGISTER_NODE(Classname, PyName, ...) \
     inline easywork::NodeRegistrar<PyName, Classname> \
-        registrar_##Classname##_;
-
-// For nodes with 1 parameter
-#define EW_REGISTER_NODE_1(Classname, PyName, ParamType1, ParamName1, DefaultVal1) \
-    template<> struct NodeCreatorImpl<Classname> { \
-        static std::shared_ptr<Node> Create(pybind11::args args, pybind11::kwargs kwargs) { \
-            ParamType1 p1 = easywork::detail::extract_arg<ParamType1>( \
-                args, kwargs, #ParamName1, 0, DefaultVal1); \
-            return std::make_shared<Classname>(p1); \
-        } \
-    }; \
-    EW_REGISTER_NODE(Classname, PyName)
-
-// For nodes with 2 parameters
-#define EW_REGISTER_NODE_2(Classname, PyName, ParamType1, ParamName1, DefaultVal1, \
-                           ParamType2, ParamName2, DefaultVal2) \
-    template<> struct NodeCreatorImpl<Classname> { \
-        static std::shared_ptr<Node> Create(pybind11::args args, pybind11::kwargs kwargs) { \
-            ParamType1 p1 = easywork::detail::extract_arg<ParamType1>( \
-                args, kwargs, #ParamName1, 0, DefaultVal1); \
-            ParamType2 p2 = easywork::detail::extract_arg<ParamType2>( \
-                args, kwargs, #ParamName2, 1, DefaultVal2); \
-            return std::make_shared<Classname>(p1, p2); \
-        } \
-    }; \
-    EW_REGISTER_NODE(Classname, PyName)
-
-// For nodes with 3 parameters
-#define EW_REGISTER_NODE_3(Classname, PyName, ParamType1, ParamName1, DefaultVal1, \
-                           ParamType2, ParamName2, DefaultVal2, \
-                           ParamType3, ParamName3, DefaultVal3) \
-    template<> struct NodeCreatorImpl<Classname> { \
-        static std::shared_ptr<Node> Create(pybind11::args args, pybind11::kwargs kwargs) { \
-            ParamType1 p1 = easywork::detail::extract_arg<ParamType1>( \
-                args, kwargs, #ParamName1, 0, DefaultVal1); \
-            ParamType2 p2 = easywork::detail::extract_arg<ParamType2>( \
-                args, kwargs, #ParamName2, 1, DefaultVal2); \
-            ParamType3 p3 = easywork::detail::extract_arg<ParamType3>( \
-                args, kwargs, #ParamName3, 2, DefaultVal3); \
-            return std::make_shared<Classname>(p1, p2, p3); \
-        } \
-    }; \
-    EW_REGISTER_NODE(Classname, PyName)
+        registrar_##Classname##_(__VA_ARGS__);
 
 } // namespace easywork

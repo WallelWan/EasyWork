@@ -22,11 +22,4 @@
  *   #include "runtime/module/camera_source.h"  // Include specific module
  */
 
-#include "module/camera_source.h"
-#include "module/canny_filter.h"
-#include "module/null_sink.h"
-#include "module/video_writer_sink.h"
-#include "module/pyfunc_node.h"
-
-// New type system example nodes
 #include "module/example_typed_nodes.h"

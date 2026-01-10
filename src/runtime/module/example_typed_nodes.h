@@ -9,7 +9,7 @@
 
 namespace easywork {
 
-// 示例：整数计数器节点（使用新的模板化基类）
+// 示例：整数计数器节点
 class IntCounter : public TypedInputNode<IntCounter, int> {
 public:
     IntCounter(int start, int max, int step)
@@ -24,10 +24,8 @@ public:
             if (fc) fc->stop();
             return 0;
         }
-
         int val = current_;
         current_ += step_;
-        spdlog::trace("IntCounter: emitted {}", val);
         return val;
     }
 
@@ -37,12 +35,11 @@ private:
     int step_;
 };
 
-// 注册为输入节点
-// 注意：这里暂时使用旧的宏，后续可以更新为专门针对类型化节点的宏
-EW_REGISTER_NODE_3(IntCounter, "IntCounter",
-                  int, start, 0,
-                  int, max, 100,
-                  int, step, 1)
+EW_REGISTER_NODE(IntCounter, "IntCounter",
+    Arg("start", 0),
+    Arg("max", 100),
+    Arg("step", 1)
+)
 
 // 示例：整数乘法节点
 class IntMultiplier : public TypedFunctionNode<IntMultiplier, int, int> {
@@ -52,17 +49,14 @@ public:
     }
 
     int forward(int input) {
-        int result = input * factor_;
-        spdlog::trace("IntMultiplier: {} -> {}", input, result);
-        return result;
+        return input * factor_;
     }
 
 private:
     int factor_;
 };
 
-EW_REGISTER_NODE_1(IntMultiplier, "IntMultiplier",
-                  int, factor, 2)
+EW_REGISTER_NODE(IntMultiplier, "IntMultiplier", Arg("factor", 2))
 
 // 示例：字符串处理器节点
 class StringPrinter : public TypedFunctionNode<StringPrinter, std::string, std::string> {
@@ -96,14 +90,14 @@ private:
     int current_;
     int max_;
     int step_;
-
-    static inline const bool kTupleRegistered = RegisterTupleType<std::tuple<int, std::string>>();
+    // 自动注册已由基类构造函数处理，此处不再需要 kTupleRegistered
 };
 
-EW_REGISTER_NODE_3(TupleEmitter, "TupleEmitter",
-                  int, start, 0,
-                  int, max, 5,
-                  int, step, 1)
+EW_REGISTER_NODE(TupleEmitter, "TupleEmitter",
+    Arg("start", 0),
+    Arg("max", 5),
+    Arg("step", 1)
+)
 
 // 示例：多输入节点
 class IntStringJoiner : public TypedMultiInputFunctionNode<IntStringJoiner, std::string, int, std::string> {
@@ -138,35 +132,18 @@ struct SmallTracked {
     int value;
     static inline std::atomic<int> live_count{0};
 
-    explicit SmallTracked(int v = 0) : value(v) {
-        ++live_count;
-    }
-
-    SmallTracked(const SmallTracked& other) : value(other.value) {
-        ++live_count;
-    }
-
-    SmallTracked(SmallTracked&& other) noexcept : value(other.value) {
-        ++live_count;
-    }
-
-    ~SmallTracked() {
-        --live_count;
-    }
+    explicit SmallTracked(int v = 0) : value(v) { ++live_count; }
+    SmallTracked(const SmallTracked& other) : value(other.value) { ++live_count; }
+    SmallTracked(SmallTracked&& other) noexcept : value(other.value) { ++live_count; }
+    ~SmallTracked() { --live_count; }
 };
 
-inline int GetSmallTrackedLiveCount() {
-    return SmallTracked::live_count.load();
-}
-
-inline void ResetSmallTrackedLiveCount() {
-    SmallTracked::live_count.store(0);
-}
+inline int GetSmallTrackedLiveCount() { return SmallTracked::live_count.load(); }
+inline void ResetSmallTrackedLiveCount() { SmallTracked::live_count.store(0); }
 
 class SmallTrackedSource : public TypedInputNode<SmallTrackedSource, SmallTracked> {
 public:
     explicit SmallTrackedSource(int max) : current_(0), max_(max) {}
-
     SmallTracked forward(tbb::flow_control* fc) {
         if (current_ >= max_) {
             if (fc) fc->stop();
@@ -174,13 +151,12 @@ public:
         }
         return SmallTracked(current_++);
     }
-
 private:
     int current_;
     int max_;
 };
 
-EW_REGISTER_NODE_1(SmallTrackedSource, "SmallTrackedSource", int, max, 3)
+EW_REGISTER_NODE(SmallTrackedSource, "SmallTrackedSource", Arg("max", 3))
 
 class SmallTrackedConsumer : public TypedFunctionNode<SmallTrackedConsumer, SmallTracked, int> {
 public:
