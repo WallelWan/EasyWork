@@ -1,6 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include "runtime/core_tbb.h"
+#include "runtime/core.h"
 #include "runtime/node_registry.h"
 #include "runtime/modules.h"
 #include "runtime/memory/frame.h"
@@ -10,7 +10,7 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(easywork_core, m) {
-    m.doc() = "EasyWork Core (TBB + OpenCV) with C++20 Factory Pattern + Type System";
+    m.doc() = "EasyWork Core (Taskflow + OpenCV) with C++20 Factory Pattern + Type System";
 
     // ========== Type System ==========
     // TypeInfo 绑定
@@ -105,6 +105,9 @@ PYBIND11_MODULE(easywork_core, m) {
                                     easywork::GetMethodDispatchForwardCount());
           },
           "Get method dispatch counts as (left, right, forward)");
+    m.def("get_method_dispatch_order_errors",
+          &easywork::GetMethodDispatchOrderErrorCount,
+          "Get method dispatch order error count");
     m.def("reset_method_dispatch_counts",
           &easywork::ResetMethodDispatchCounts,
           "Reset method dispatch counts");

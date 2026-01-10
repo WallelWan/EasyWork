@@ -5,7 +5,7 @@
 
 ### 1.1 数据结构与编译期优化 (De-stringification)
 - [ ] **数据结构改造**
-  - 修改 `MethodTaggedValue` (在 `core_tbb.h`)：将 `std::string method` 替换为 `size_t method_id`。
+  - 修改 `MethodTaggedValue` (在 `core.h`)：将 `std::string method` 替换为 `size_t method_id`。
 - [ ] **编译期哈希**
   - 利用 `constexpr hash_string` (在 `node_registry.h`)。
   - 修改 `EW_EXPORT_METHODS` 宏 (在 `macros.h`)，在编译期计算方法名的 Hash ID。

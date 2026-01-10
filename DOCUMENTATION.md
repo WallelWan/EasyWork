@@ -4,7 +4,7 @@
 
 ## 1. 项目概述
 
-EasyWork 是基于 oneTBB 流图的计算图执行框架，提供：
+EasyWork 是基于 Taskflow 静态调度的计算图执行框架，提供：
 
 - C++ 运行时与节点系统
 - Python API（构建数据流图）
@@ -15,7 +15,7 @@ EasyWork 是基于 oneTBB 流图的计算图执行框架，提供：
 
 ### 2.1 两阶段构建（Deferred Connection）
 
-1. **Build**：创建 TBB 节点并构建执行图内部结构  
+1. **Build**：创建 Taskflow 任务并构建执行图内部结构  
 2. **Connect**：根据上游关系进行节点连接  
 
 该模式允许任意拓扑定义顺序，并简化连接逻辑。
@@ -129,4 +129,3 @@ python3 tests/test_complete_type_system.py
 - 类名 `PascalCase`  
 - 函数与变量 `snake_case`  
 - 建议添加类型注解  
-
