@@ -178,10 +178,62 @@ def test_module_dynamic_access():
         return False
 
 
-# ========== 测试 6：Tuple 自动索引与多输入 ==========
+# ========== 测试 6：模块模式切换 ==========
+def test_module_modes():
+    """测试 ew.module 在符号模式与普通模式下的行为"""
+    print("\n=== 测试 6：模块模式切换 ===")
+
+    try:
+        eager_node = ew.module.NumberSource(0, 1, 1)
+        if isinstance(eager_node, ew.NodeWrapper):
+            print("✗ 普通模式下不应返回 NodeWrapper")
+            return False
+        if not isinstance(eager_node, ew._core.Node):
+            print("✗ 普通模式下应返回 C++ Node 实例")
+            return False
+
+        @ew.symbolic_context
+        def build_symbol():
+            node = ew.module.NumberSource(0, 1, 1)
+            symbol = node.read()
+            return node, symbol
+
+        node, symbol = build_symbol()
+        if not isinstance(node, ew.NodeWrapper):
+            print("✗ 装饰器下应返回 NodeWrapper")
+            return False
+        if not isinstance(symbol, ew.Symbol):
+            print("✗ 装饰器下 read() 应返回 Symbol")
+            return False
+
+        class ModePipeline(ew.Pipeline):
+            def __init__(self):
+                super().__init__()
+
+            def construct(self):
+                self.source = ew.module.NumberSource(start=0, max=1, step=1)
+                value = self.source.read()
+                self.sink = ew.module.MultiplyBy(factor=2)
+                self.sink(value)
+
+        pipeline = ModePipeline()
+        pipeline.validate()
+        if not isinstance(pipeline.source, ew.NodeWrapper):
+            print("✗ Pipeline construct 内应返回 NodeWrapper")
+            return False
+        print("✓ 模块模式切换正常")
+        return True
+    except Exception as e:
+        print(f"✗ 测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+# ========== 测试 7：Tuple 自动索引与多输入 ==========
 def test_tuple_auto_index_and_multi_input():
     """测试 tuple 自动解包与多输入节点连接"""
-    print("\n=== 测试 6：Tuple 自动索引与多输入 ===")
+    print("\n=== 测试 7：Tuple 自动索引与多输入 ===")
 
     class TuplePipeline(ew.Pipeline):
         def __init__(self):
@@ -210,10 +262,10 @@ def test_tuple_auto_index_and_multi_input():
         return False
 
 
-# ========== 测试 7：Small Buffer 析构安全 ==========
+# ========== 测试 8：Small Buffer 析构安全 ==========
 def test_small_buffer_safety():
     """测试 SBO 析构是否正确释放小类型"""
-    print("\n=== 测试 7：Small Buffer 析构安全 ===")
+    print("\n=== 测试 8：Small Buffer 析构安全 ===")
 
     class SmallTrackedPipeline(ew.Pipeline):
         def __init__(self):
@@ -243,6 +295,44 @@ def test_small_buffer_safety():
         return False
 
 
+# ========== 测试 9：方法分发与 set_input_for ==========
+def test_method_dispatch():
+    """测试 method 分发能区分不同的上游连接"""
+    print("\n=== 测试 9：方法分发与 set_input_for ===")
+
+    class MethodDispatchPipeline(ew.Pipeline):
+        def __init__(self):
+            super().__init__()
+            self.source = ew.module.NumberSource(start=0, max=2, step=1)
+            self.recorder = ew.module.MethodDispatchRecorder()
+
+        def construct(self):
+            value = self.source.read()
+            self.recorder.left(value)
+            self.recorder.right(value)
+            self.recorder(value)
+
+    try:
+        ew._core.reset_method_dispatch_counts()
+        pipeline = MethodDispatchPipeline()
+        pipeline.validate()
+        pipeline.run()
+        left_count, right_count, forward_count = ew._core.get_method_dispatch_counts()
+        if left_count != 3 or right_count != 3 or forward_count != 3:
+            print(
+                "✗ 方法分发计数错误: "
+                f"left={left_count}, right={right_count}, forward={forward_count}"
+            )
+            return False
+        print("✓ 方法分发计数正确")
+        return True
+    except Exception as e:
+        print(f"✗ 测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 # ========== 主测试函数 ==========
 def main():
     print("=" * 60)
@@ -257,8 +347,10 @@ def main():
     results.append(("节点类型信息查询", test_node_type_info()))
     results.append(("Symbol 和连接", test_symbol_connections()))
     results.append(("模块动态访问", test_module_dynamic_access()))
+    results.append(("模块模式切换", test_module_modes()))
     results.append(("Tuple 自动索引与多输入", test_tuple_auto_index_and_multi_input()))
     results.append(("Small Buffer 析构安全", test_small_buffer_safety()))
+    results.append(("方法分发与 set_input_for", test_method_dispatch()))
 
     # 汇总结果
     print("\n" + "=" * 60)

@@ -98,6 +98,16 @@ PYBIND11_MODULE(easywork_core, m) {
     m.def("reset_small_tracked_live_count",
           &easywork::ResetSmallTrackedLiveCount,
           "Reset live count for SmallTracked values");
+    m.def("get_method_dispatch_counts",
+          []() {
+              return py::make_tuple(easywork::GetMethodDispatchLeftCount(),
+                                    easywork::GetMethodDispatchRightCount(),
+                                    easywork::GetMethodDispatchForwardCount());
+          },
+          "Get method dispatch counts as (left, right, forward)");
+    m.def("reset_method_dispatch_counts",
+          &easywork::ResetMethodDispatchCounts,
+          "Reset method dispatch counts");
 
     // ========== Frame (Zero-Copy Buffer Protocol) ==========
     py::class_<easywork::FrameBuffer, std::shared_ptr<easywork::FrameBuffer>>(
@@ -116,14 +126,6 @@ PYBIND11_MODULE(easywork_core, m) {
             );
         });
 
-    // ========== PyFuncNode (Manual Binding Only) ==========
-    // Note: PyFuncNode is NOT registered in the factory as it requires Python callables
-    py::class_<easywork::PyFuncNode, easywork::Node,
-               std::shared_ptr<easywork::PyFuncNode>>(m, "PyFuncNode")
-        .def(py::init<py::function>())
-        .def("build", &easywork::PyFuncNode::build)
-        .def("set_input", &easywork::PyFuncNode::set_input);
-
-    // Note: All other nodes are automatically available through the factory pattern.
+    // Note: All nodes are automatically available through the factory pattern.
     // Use ew.module.NumberSource(), ew.module.MultiplyBy(), etc. in Python.
 }
