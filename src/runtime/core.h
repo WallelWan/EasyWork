@@ -79,17 +79,27 @@ public:
         size_t method_id;
     };
 
+    struct PortInfo {
+        size_t index;
+        size_t method_id;
+        bool is_control;
+    };
+
     std::vector<UpstreamConnection> upstreams_;
+    std::vector<PortInfo> port_map_;
     std::vector<std::string> upstream_methods_debug_; // Keep strings for debug/introspection
 
     void add_upstream(Node* n, std::string method = {}) {
         size_t id = method.empty() ? ID_FORWARD : hash_string(method);
+        size_t index = upstreams_.size();
         upstreams_.push_back({n, id});
+        port_map_.push_back({index, id, id != ID_FORWARD});
         upstream_methods_debug_.push_back(std::move(method));
     }
 
     void ClearUpstreams() {
         upstreams_.clear();
+        port_map_.clear();
         upstream_methods_debug_.clear();
     }
 
@@ -117,12 +127,26 @@ public:
 
     // Taskflow Integration
     tf::Task get_task() const { return task_; }
+
+    const std::vector<Node*>& get_upstreams() const {
+        upstream_nodes_.clear();
+        upstream_nodes_.reserve(upstreams_.size());
+        for (const auto& conn : upstreams_) {
+            if (conn.node) {
+                upstream_nodes_.push_back(conn.node);
+            }
+        }
+        return upstream_nodes_;
+    }
     
     // Output Storage
     Value output_value_;
 
 protected:
     tf::Task task_;
+
+private:
+    mutable std::vector<Node*> upstream_nodes_;
 };
 
 namespace detail {
@@ -185,38 +209,75 @@ public:
             task_ = g.taskflow.emplace([this]() {
                 // Function Logic
                 try {
-                    // 1. Gather Inputs
-                    JoinTuple inputs = GatherInputs(std::index_sequence_for<InputTs...>{});
-                    
-                    // 2. Invoke
-                    // We need to pass method IDs. 
-                    // GatherInputs can return a tuple of values. 
-                    // We also need to know the method ID associated with each input.
-                    // But InvokeWithValues expects (Values, Methods).
-                    
-                    // Optimization: We know method IDs statically from upstreams_.
-                    // Construct methods array.
-                    std::array<size_t, sizeof...(InputTs)> methods;
-                    if (upstreams_.size() == sizeof...(InputTs)) {
-                         for(size_t i=0; i<sizeof...(InputTs); ++i) {
-                             methods[i] = upstreams_[i].method_id;
-                         }
-                    } else if (sizeof...(InputTs) == 1 && !upstreams_.empty()) {
-                         // Multiplexing case (single input, multiple upstreams?)
-                         // In TBB, multiple edges to one port -> messages interleave.
-                         // In Taskflow static graph, this is tricky. 
-                         // We probably take the LAST one or need a Join/Merge node.
-                         // For now, assume strict 1:1 or 1:N mapping handled before.
-                         // If 1 input arg, but N upstreams, we take the first?
-                         // TBB queueing join_node handles this.
-                         // Static graph -> We explicitly depend on ONE upstream per input slot.
-                         // If multiple upstreams, it implies a Merge.
-                         // For now, use 0-th.
-                         methods[0] = upstreams_[0].method_id;
+                    Value last_output;
+                    bool has_output = false;
+
+                    if constexpr (sizeof...(InputTs) == 1) {
+                        using InputT = std::tuple_element_t<0, std::tuple<InputTs...>>;
+                        std::vector<Value> forward_inputs;
+                        forward_inputs.reserve(upstreams_.size());
+
+                        for (const auto& conn : upstreams_) {
+                            if (!conn.node) {
+                                continue;
+                            }
+                            Value input = conn.node->output_value_;
+                            if (conn.method_id != ID_FORWARD) {
+                                auto result = InvokeSingleInput(conn.method_id, input);
+                                last_output = Value(std::move(result));
+                                has_output = true;
+                            } else {
+                                forward_inputs.push_back(std::move(input));
+                            }
+                        }
+
+                        for (const auto& input : forward_inputs) {
+                            auto result = InvokeSingleInput(ID_FORWARD, input);
+                            last_output = Value(std::move(result));
+                            has_output = true;
+                        }
+                    } else {
+                        JoinTuple inputs = GatherInputs(std::index_sequence_for<InputTs...>{});
+                        auto typed_inputs = CastInputs(inputs, std::index_sequence_for<InputTs...>{});
+
+                        std::array<size_t, sizeof...(InputTs)> methods;
+                        methods.fill(ID_FORWARD);
+                        for (size_t i = 0; i < upstreams_.size() && i < sizeof...(InputTs); ++i) {
+                            methods[i] = upstreams_[i].method_id;
+                        }
+
+                        bool has_control = false;
+                        bool control_consistent = true;
+                        size_t control_id = ID_FORWARD;
+                        bool has_forward = false;
+
+                        for (size_t i = 0; i < sizeof...(InputTs); ++i) {
+                            if (methods[i] == ID_FORWARD) {
+                                has_forward = true;
+                                continue;
+                            }
+                            if (!has_control) {
+                                control_id = methods[i];
+                                has_control = true;
+                            } else if (methods[i] != control_id) {
+                                control_consistent = false;
+                            }
+                        }
+
+                        if (has_control && control_consistent) {
+                            auto result = InvokeTupleInputs(control_id, typed_inputs);
+                            last_output = Value(std::move(result));
+                            has_output = true;
+                        }
+
+                        if (has_forward) {
+                            auto result = InvokeTupleInputs(ID_FORWARD, typed_inputs);
+                            last_output = Value(std::move(result));
+                            has_output = true;
+                        }
                     }
 
-                    auto result = InvokeWithValuesAndMethods(inputs, methods, std::index_sequence_for<InputTs...>{});
-                    output_value_ = Value(std::move(result));
+                    output_value_ = has_output ? std::move(last_output) : Value();
                 } catch (const std::exception& e) {
                     std::cerr << "Error in node execution: " << e.what() << std::endl;
                     output_value_ = Value(); 
@@ -262,27 +323,25 @@ private:
     }
 
     template<size_t... Index>
-    OutputT InvokeWithValuesAndMethods(const JoinTuple& vals,
-                                       const std::array<size_t, sizeof...(InputTs)>& methods,
-                                       std::index_sequence<Index...>) {
-        // Unwrap logic: If value itself is tagged, use that. Else use static method ID.
-        // But we are optimizing to remove dynamic tagging.
-        // Let's assume input values are RAW, and method comes from 'methods' array.
-        
-        std::tuple<InputTs...> inputs(std::get<Index>(vals).template cast<InputTs>()...);
-        
-        // Dispatch Logic
-        size_t method = methods[0];
-        bool consistent = true;
-        // Check consistency if needed, or just use first.
-        
-        if (method != ID_FORWARD) {
+    std::tuple<InputTs...> CastInputs(const JoinTuple& vals, std::index_sequence<Index...>) {
+        return std::make_tuple(std::get<Index>(vals).template cast<InputTs>()...);
+    }
+
+    OutputT InvokeSingleInput(size_t method_id, const Value& value) {
+        using InputT = std::tuple_element_t<0, std::tuple<InputTs...>>;
+        InputT input = value.template cast<InputT>();
+        return InvokeTupleInputs(method_id, std::tuple<InputT>(std::move(input)));
+    }
+
+    template<typename TupleT>
+    OutputT InvokeTupleInputs(size_t method_id, TupleT&& inputs) {
+        if (method_id != ID_FORWARD) {
             if constexpr (detail::has_method_table_v<
                               Derived,
                               std::unordered_map<size_t,
                                                  OutputT (Derived::*)(InputTs...)>>) {
                 static const auto table = Derived::method_table();
-                auto it = table.find(method);
+                auto it = table.find(method_id);
                 if (it != table.end()) {
                     auto fn = it->second;
                     return std::apply(
@@ -290,19 +349,17 @@ private:
                             return (static_cast<Derived*>(this)->*fn)(
                                 std::forward<decltype(args)>(args)...);
                         },
-                        inputs);
+                        std::forward<TupleT>(inputs));
                 }
             }
-            // Fallback? or throw?
-             // throw std::runtime_error("Unknown method ID");
         }
-        
+
         return std::apply(
             [this](auto&&... args) {
                 return static_cast<Derived*>(this)->forward(
                     std::forward<decltype(args)>(args)...);
             },
-            inputs);
+            std::forward<TupleT>(inputs));
     }
 };
 

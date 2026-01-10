@@ -272,11 +272,15 @@ def test_method_dispatch():
         pipeline.validate()
         pipeline.run()
         left_count, right_count, forward_count = ew._core.get_method_dispatch_counts()
+        order_errors = ew._core.get_method_dispatch_order_errors()
         if left_count != 3 or right_count != 3 or forward_count != 3:
             print(
                 "✗ 方法分发计数错误: "
                 f"left={left_count}, right={right_count}, forward={forward_count}"
             )
+            return False
+        if order_errors != 0:
+            print(f"✗ 控制端口未优先执行，order_errors={order_errors}")
             return False
         print("✓ 方法分发计数正确")
         return True

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core_tbb.h"
+#include "../core.h"
 #include "../node_registry.h"
 #include "../macros.h"
 #include <atomic>
@@ -15,7 +15,7 @@ public:
     NumberSource(int start, int max, int step)
         : current_(start), max_(max), step_(step) {}
 
-    int forward(tbb::flow_control* fc) {
+    int forward(FlowControl* fc) {
         if (current_ > max_) {
             if (fc) {
                 fc->stop();
@@ -81,7 +81,7 @@ public:
     PairEmitter(int start, int max)
         : current_(start), max_(max) {}
 
-    std::tuple<int, std::string> forward(tbb::flow_control* fc) {
+    std::tuple<int, std::string> forward(FlowControl* fc) {
         if (current_ > max_) {
             if (fc) {
                 fc->stop();
@@ -128,7 +128,7 @@ class SmallTrackedSource : public TypedMultiInputFunctionNode<SmallTrackedSource
 public:
     explicit SmallTrackedSource(int max) : current_(0), max_(max) {}
 
-    SmallTracked forward(tbb::flow_control* fc) {
+    SmallTracked forward(FlowControl* fc) {
         if (current_ >= max_) {
             if (fc) {
                 fc->stop();
@@ -156,17 +156,26 @@ EW_REGISTER_NODE(SmallTrackedConsumer, "SmallTrackedConsumer")
 
 class MethodDispatchRecorder : public TypedMultiInputFunctionNode<MethodDispatchRecorder, int, int> {
 public:
+    MethodDispatchRecorder() = default;
+
     int forward(int input) {
+        if (!left_ready_ || !right_ready_) {
+            ++order_error_count;
+        }
+        left_ready_ = false;
+        right_ready_ = false;
         ++forward_count;
         return input;
     }
 
     int left(int input) {
+        left_ready_ = true;
         ++left_count;
         return input;
     }
 
     int right(int input) {
+        right_ready_ = true;
         ++right_count;
         return input;
     }
@@ -176,6 +185,11 @@ public:
     static inline std::atomic<int> left_count{0};
     static inline std::atomic<int> right_count{0};
     static inline std::atomic<int> forward_count{0};
+    static inline std::atomic<int> order_error_count{0};
+
+private:
+    bool left_ready_{false};
+    bool right_ready_{false};
 };
 
 inline int GetMethodDispatchLeftCount() {
@@ -190,10 +204,15 @@ inline int GetMethodDispatchForwardCount() {
     return MethodDispatchRecorder::forward_count.load();
 }
 
+inline int GetMethodDispatchOrderErrorCount() {
+    return MethodDispatchRecorder::order_error_count.load();
+}
+
 inline void ResetMethodDispatchCounts() {
     MethodDispatchRecorder::left_count.store(0);
     MethodDispatchRecorder::right_count.store(0);
     MethodDispatchRecorder::forward_count.store(0);
+    MethodDispatchRecorder::order_error_count.store(0);
 }
 
 EW_REGISTER_NODE(MethodDispatchRecorder, "MethodDispatchRecorder")

@@ -305,14 +305,14 @@ class Pipeline:
         self._reset_connections()
         self._with_active_pipeline(self.construct)
 
-        # 2. Build: Create all C++ TBB nodes
+        # 2. Build: Create all C++ Taskflow nodes
         print(f"[EasyWork] Materializing Graph ({len(self._nodes)} nodes)...")
         for node in self._nodes:
             if not node.built:
                 node.raw.build(self._graph)
                 node.built = True
 
-        # 3. Connect: Link TBB edges
+        # 3. Connect: Link Taskflow edges
         print("[EasyWork] Connecting Edges...")
         for node in self._nodes:
             node.raw.connect()

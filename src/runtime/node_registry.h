@@ -10,7 +10,7 @@
 #include <tuple>
 #include <utility>
 #include <pybind11/pybind11.h>
-#include "core_tbb.h"
+#include "core.h"
 
 namespace easywork {
 

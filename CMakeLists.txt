@@ -32,6 +32,9 @@ message(STATUS "OpenCV Version: ${OpenCV_VERSION}")
 # Taskflow (Header-Only)
 message(STATUS "Using Taskflow from extern/taskflow")
 
+# Threads (pthread)
+find_package(Threads REQUIRED)
+
 # spdlog (Force build from source for ABI compatibility)
 include(FetchContent)
 FetchContent_Declare(
@@ -98,6 +101,7 @@ pybind11_add_module(easywork_core ${SOURCES})
 target_link_libraries(easywork_core PRIVATE
     ${OpenCV_LIBS}
     spdlog::spdlog
+    Threads::Threads
 )
 
 # Output directory
