@@ -62,7 +62,7 @@ private:
 // ========== NodeTypeInfo ==========
 // 节点类型元数据，描述输入输出类型
 struct NodeTypeInfo {
-    std::vector<TypeInfo> input_types;   // 空表示 InputNode
+    std::vector<TypeInfo> input_types;   // 空表示 Source 节点
     std::vector<TypeInfo> output_types;  // 单个或多个输出
 
     // 检查是否接受某种输入类型
