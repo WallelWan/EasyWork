@@ -1,5 +1,6 @@
 from . import easywork_core as _core
-import re
+
+_ACTIVE_PIPELINE = None
 
 # ========== Symbol ==========
 class Symbol:
@@ -20,10 +21,14 @@ class Symbol:
 
         # 检查是否是 tuple 类型
         if not self._is_tuple_type(output_type):
+            if "tuple" in output_type.name.lower() or "St4tuple" in output_type.name:
+                raise ValueError(f"Tuple type not registered: {output_type.name}")
             raise ValueError(f"Cannot unpack non-tuple type: {output_type.name}")
 
         # 获取 tuple 元素数量
         num_elements = self._get_tuple_size(output_type)
+        if num_elements <= 0:
+            raise ValueError(f"Tuple type not registered: {output_type.name}")
 
         # 为每个元素创建 Symbol
         symbols = []
@@ -36,21 +41,11 @@ class Symbol:
 
     def _is_tuple_type(self, type_info):
         """检查类型是否是 tuple。"""
-        return "tuple" in type_info.name.lower() or "St4tuple" in type_info.name
+        return _core.get_tuple_size(type_info) > 0
 
     def _get_tuple_size(self, type_info):
         """获取 tuple 的元素数量。"""
-        # 从 type_name 解析，例如 "tuple<int, float>" -> 2
-        match = re.search(r'tuple<(.+?)>', type_info.name)
-        if match:
-            types_str = match.group(1)
-            # 计算逗号数量 + 1
-            return types_str.count(',') + 1
-        # 尝试解析 STL tuple 格式
-        match = re.search(r'St4tuple<IJ([a-zA-Z0-9_]*)EE', type_info.name)
-        if match:
-            return int(match.group(1))
-        return 1
+        return _core.get_tuple_size(type_info)
 
 # ========== Base Node Wrapper ==========
 class NodeWrapper:
@@ -70,34 +65,60 @@ class NodeWrapper:
 
     def write(self, input_symbol):
         """Sink node: connect input to this node."""
-        self._cpp_node.set_input(input_symbol.producer_node)
+        symbol = _resolve_symbol(input_symbol)
+        self._cpp_node.set_input(symbol.producer_node)
 
     def consume(self, input_symbol):
         """Sink node: connect input to this node."""
-        self._cpp_node.set_input(input_symbol.producer_node)
+        symbol = _resolve_symbol(input_symbol)
+        self._cpp_node.set_input(symbol.producer_node)
 
     def __call__(self, *args, **kwargs):
         """Enable calling the node directly (like module(x))."""
         if not args:
             raise ValueError("Node requires at least one input")
 
-        # 单输入：直接连接
-        if len(args) == 1 and not kwargs:
-            symbol = args[0]
-            if isinstance(symbol, Symbol):
-                # 处理 tuple 索引
-                if symbol.tuple_index is not None:
-                    # TODO: 创建 TupleGetNode（后续实现）
-                    pass
-                # 直接连接
-                self._cpp_node.set_input(symbol.producer_node)
-                return Symbol(self._cpp_node)
+        if kwargs:
+            raise NotImplementedError("Keyword inputs are not supported")
 
-        # 多输入：暂时不支持
+        if len(args) == 1:
+            symbol = _resolve_symbol(args[0])
+            self._cpp_node.set_input(symbol.producer_node)
+            return Symbol(self._cpp_node)
+
         if len(args) > 1:
-            raise NotImplementedError("Multi-input nodes not yet supported")
+            for symbol in args:
+                resolved = _resolve_symbol(symbol)
+                self._cpp_node.set_input(resolved.producer_node)
+            return Symbol(self._cpp_node)
 
         raise NotImplementedError("This node is not callable")
+
+
+def _get_active_pipeline():
+    if _ACTIVE_PIPELINE is None:
+        raise RuntimeError("Tuple indexing requires an active Pipeline context")
+    return _ACTIVE_PIPELINE
+
+
+def _register_internal_node(cpp_node):
+    pipeline = _get_active_pipeline()
+    return pipeline._register_internal_node(cpp_node)
+
+
+def _resolve_symbol(symbol):
+    if not isinstance(symbol, Symbol):
+        raise TypeError("Input must be a Symbol")
+    if symbol.tuple_index is None:
+        return symbol
+    type_info = symbol.producer_node.type_info
+    if not type_info.output_types:
+        raise ValueError("Tuple producer has no outputs")
+    tuple_get_node = _core.create_tuple_get_node(type_info.output_types[0],
+                                                 symbol.tuple_index)
+    wrapper = _register_internal_node(tuple_get_node)
+    wrapper.raw.set_input(symbol.producer_node)
+    return Symbol(wrapper.raw)
 
 # ========== Dynamic Module (C++20 Factory Pattern) ==========
 class _DynamicModule:
@@ -164,6 +185,7 @@ class Pipeline:
         self._graph = _core.ExecutionGraph()
         self._executor = _core.Executor()
         self._nodes = []
+        self._internal_nodes = []
         self._has_run = False
         self._validated = False
 
@@ -198,7 +220,9 @@ class Pipeline:
         print("[EasyWork] Validating types...")
 
         # 1. 执行 construct 定义拓扑
-        self.construct()
+        self._clear_internal_nodes()
+        self._reset_connections()
+        self._with_active_pipeline(self.construct)
 
         # 2. 构建节点（类型信息在 build 后可用）
         for node in self._nodes:
@@ -218,9 +242,35 @@ class Pipeline:
                 errors.append(f"Cannot get type info for node: {e}")
                 continue
 
-            # 检查每个上游连接
-            # 注意：暂时简化处理，因为 upstreams 访问可能不可用
-            # TODO: 完整实现类型检查逻辑
+            upstreams = list(cpp_node.upstreams)
+
+            if not type_info.input_types:
+                if upstreams:
+                    errors.append(
+                        f"Type mismatch: source node has unexpected inputs "
+                        f"(got {len(upstreams)})")
+                continue
+
+            if len(upstreams) != len(type_info.input_types):
+                errors.append(
+                    f"Type mismatch: node expects {len(type_info.input_types)} inputs "
+                    f"but got {len(upstreams)}")
+                continue
+
+            for idx, upstream in enumerate(upstreams):
+                upstream_type = upstream.type_info
+                if not upstream_type.output_types:
+                    errors.append(
+                        f"Type mismatch: upstream node has no outputs at input {idx}")
+                    continue
+                if len(upstream_type.output_types) != 1:
+                    errors.append(
+                        f"Type mismatch: upstream node has multiple outputs at input {idx}")
+                    continue
+                if upstream_type.output_types[0] != type_info.input_types[idx]:
+                    errors.append(
+                        f"Type mismatch: expected {type_info.input_types[idx].name} "
+                        f"but got {upstream_type.output_types[0].name} at input {idx}")
 
         if errors:
             error_msg = "\n".join(errors)
@@ -241,7 +291,9 @@ class Pipeline:
             self._graph.reset()
 
         # 1. Trace: Execute user's connection logic
-        self.construct()
+        self._clear_internal_nodes()
+        self._reset_connections()
+        self._with_active_pipeline(self.construct)
 
         # 2. Build: Create all C++ TBB nodes
         print(f"[EasyWork] Materializing Graph ({len(self._nodes)} nodes)...")
@@ -266,3 +318,33 @@ class Pipeline:
         except KeyboardInterrupt:
             print("\n[EasyWork] Stopping...")
         self._has_run = True
+
+    def _with_active_pipeline(self, fn):
+        global _ACTIVE_PIPELINE
+        previous = _ACTIVE_PIPELINE
+        _ACTIVE_PIPELINE = self
+        try:
+            return fn()
+        finally:
+            _ACTIVE_PIPELINE = previous
+
+    def _register_internal_node(self, cpp_node):
+        wrapper = NodeWrapper(cpp_node)
+        self._internal_nodes.append(wrapper)
+        if wrapper not in self._nodes:
+            self._nodes.append(wrapper)
+        return wrapper
+
+    def _clear_internal_nodes(self):
+        if not hasattr(self, "_internal_nodes"):
+            self._internal_nodes = []
+        if not self._internal_nodes:
+            return
+        for node in self._internal_nodes:
+            if node in self._nodes:
+                self._nodes.remove(node)
+        self._internal_nodes = []
+
+    def _reset_connections(self):
+        for node in self._nodes:
+            node.raw.clear_upstreams()
