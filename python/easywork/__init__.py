@@ -176,18 +176,6 @@ class _DynamicModule:
 # Create ew.module access point
 module = _DynamicModule()
 
-# ========== PyFunc (Special Case) ==========
-class PyFunc(NodeWrapper):
-    """Wrapper for Python function nodes (manual binding, not in factory)."""
-
-    def __init__(self, py_callable):
-        super().__init__(_core.PyFuncNode(py_callable))
-
-    def call(self, input_symbol):
-        """Connect the Python function to the input symbol."""
-        self._cpp_node.set_input(input_symbol.producer_node)
-        return Symbol(self._cpp_node)
-
 # ========== Pipeline (PyTorch-style) ==========
 class Pipeline:
     """PyTorch-style pipeline for defining computation graphs.

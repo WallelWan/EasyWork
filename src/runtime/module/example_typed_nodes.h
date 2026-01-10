@@ -5,6 +5,7 @@
 #include <atomic>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 
 namespace easywork {
 
@@ -151,5 +152,59 @@ public:
 };
 
 EW_REGISTER_NODE(SmallTrackedConsumer, "SmallTrackedConsumer")
+
+class MethodDispatchRecorder : public TypedFunctionNode<MethodDispatchRecorder, int, int> {
+public:
+    int forward(int input) {
+        ++forward_count;
+        return input;
+    }
+
+    int left(int input) {
+        ++left_count;
+        return input;
+    }
+
+    int right(int input) {
+        ++right_count;
+        return input;
+    }
+
+    std::vector<std::string> exposed_methods() const override {
+        return {"forward", "left", "right"};
+    }
+
+    static std::unordered_map<std::string, int (MethodDispatchRecorder::*)(int)>
+    method_table() {
+        return {
+            {"left", &MethodDispatchRecorder::left},
+            {"right", &MethodDispatchRecorder::right},
+        };
+    }
+
+    static inline std::atomic<int> left_count{0};
+    static inline std::atomic<int> right_count{0};
+    static inline std::atomic<int> forward_count{0};
+};
+
+inline int GetMethodDispatchLeftCount() {
+    return MethodDispatchRecorder::left_count.load();
+}
+
+inline int GetMethodDispatchRightCount() {
+    return MethodDispatchRecorder::right_count.load();
+}
+
+inline int GetMethodDispatchForwardCount() {
+    return MethodDispatchRecorder::forward_count.load();
+}
+
+inline void ResetMethodDispatchCounts() {
+    MethodDispatchRecorder::left_count.store(0);
+    MethodDispatchRecorder::right_count.store(0);
+    MethodDispatchRecorder::forward_count.store(0);
+}
+
+EW_REGISTER_NODE(MethodDispatchRecorder, "MethodDispatchRecorder")
 
 } // namespace easywork
