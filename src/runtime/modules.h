@@ -17,7 +17,6 @@
  * - PairEmitter: Emits (int, string) tuples
  * - PairJoiner: Joins int/string pairs into one string
  * - SmallTrackedSource/SmallTrackedConsumer: SBO safety check
- * - PyFuncNode: Wraps Python callable (manual binding, not in factory)
  *
  * Usage:
  *   #include "runtime/modules.h"  // Include all modules

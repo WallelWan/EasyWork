@@ -243,6 +243,44 @@ def test_small_buffer_safety():
         return False
 
 
+# ========== 测试 8：方法分发与 set_input_for ==========
+def test_method_dispatch():
+    """测试 method 分发能区分不同的上游连接"""
+    print("\n=== 测试 8：方法分发与 set_input_for ===")
+
+    class MethodDispatchPipeline(ew.Pipeline):
+        def __init__(self):
+            super().__init__()
+            self.source = ew.module.NumberSource(start=0, max=2, step=1)
+            self.recorder = ew.module.MethodDispatchRecorder()
+
+        def construct(self):
+            value = self.source.read()
+            self.recorder.left(value)
+            self.recorder.right(value)
+            self.recorder(value)
+
+    try:
+        ew._core.reset_method_dispatch_counts()
+        pipeline = MethodDispatchPipeline()
+        pipeline.validate()
+        pipeline.run()
+        left_count, right_count, forward_count = ew._core.get_method_dispatch_counts()
+        if left_count != 3 or right_count != 3 or forward_count != 3:
+            print(
+                "✗ 方法分发计数错误: "
+                f"left={left_count}, right={right_count}, forward={forward_count}"
+            )
+            return False
+        print("✓ 方法分发计数正确")
+        return True
+    except Exception as e:
+        print(f"✗ 测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 # ========== 主测试函数 ==========
 def main():
     print("=" * 60)
@@ -259,6 +297,7 @@ def main():
     results.append(("模块动态访问", test_module_dynamic_access()))
     results.append(("Tuple 自动索引与多输入", test_tuple_auto_index_and_multi_input()))
     results.append(("Small Buffer 析构安全", test_small_buffer_safety()))
+    results.append(("方法分发与 set_input_for", test_method_dispatch()))
 
     # 汇总结果
     print("\n" + "=" * 60)

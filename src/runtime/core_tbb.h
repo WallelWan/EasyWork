@@ -1,6 +1,7 @@
 #pragma once
 
 #include <tbb/flow_graph.h>
+#include <array>
 #include <memory>
 #include <vector>
 #include <atomic>
@@ -9,6 +10,7 @@
 #include <tuple>
 #include <stdexcept>
 #include <type_traits>
+#include <concepts>
 #include <string>
 #include <utility>
 #include <unordered_map>
@@ -38,13 +40,16 @@ public:
     // Phase 2 Fix: Deferred connection.
     // Store upstream nodes here, and connect in connect() phase.
     std::vector<Node*> upstreams_;
+    std::vector<std::string> upstream_methods_;
 
-    void add_upstream(Node* n) {
+    void add_upstream(Node* n, std::string method = {}) {
         upstreams_.push_back(n);
+        upstream_methods_.push_back(std::move(method));
     }
 
     void ClearUpstreams() {
         upstreams_.clear();
+        upstream_methods_.clear();
     }
 
     // Must be called AFTER build()
@@ -59,8 +64,11 @@ public:
     }
 
     virtual void set_input_for(const std::string& method, Node* upstream) {
-        (void)method;
-        set_input(upstream);
+        if (method.empty() || method == "forward") {
+            set_input(upstream);
+            return;
+        }
+        add_upstream(upstream, method);
     }
 
     // 新增：获取类型信息（纯虚函数）
@@ -74,14 +82,20 @@ public:
     virtual tbb::flow::receiver<Value>* get_receiver() { return nullptr; }
 
     const std::vector<Node*>& get_upstreams() const { return upstreams_; }
-
-    std::unique_lock<std::mutex> AcquireExecutionLock() {
-        return std::unique_lock<std::mutex>(execution_mutex_);
-    }
-
-private:
-    std::mutex execution_mutex_;
 };
+
+struct MethodTaggedValue {
+    std::string method;
+    Value payload;
+};
+
+inline bool IsTaggedValue(const Value& value) {
+    return value.has_value() && value.type() == TypeInfo::create<MethodTaggedValue>();
+}
+
+inline MethodTaggedValue AsTaggedValue(const Value& value) {
+    return value.cast<MethodTaggedValue>();
+}
 
 namespace detail {
 // Helper trait to check if a type is std::tuple
@@ -89,6 +103,11 @@ template <typename T> struct is_tuple_impl : std::false_type {};
 template <typename... Ts> struct is_tuple_impl<std::tuple<Ts...>> : std::true_type {};
 template <typename T> struct is_tuple : is_tuple_impl<std::decay_t<T>> {};
 template <typename T> inline constexpr bool is_tuple_v = is_tuple<T>::value;
+
+template<typename Derived, typename MethodTable>
+inline constexpr bool has_method_table_v = requires {
+    { Derived::method_table() } -> std::same_as<MethodTable>;
+};
 } // namespace detail
 
 // Forward declaration
@@ -115,7 +134,6 @@ public:
             g.tbb_graph,
             [this](tbb::flow_control& fc) -> Value {
                 // 调用派生类的 forward()
-                auto execution_lock = this->AcquireExecutionLock();
                 auto result = static_cast<Derived*>(this)->forward(&fc);
 
                 // 如果返回 nullptr（针对 Frame 类型），终止流
@@ -176,10 +194,31 @@ public:
             [this](Value val) -> Value {
                 try {
                     // 将 Value 转换为输入类型
-                    auto input = val.cast<InputT>();
+                    std::string method;
+                    Value payload = val;
+                    if (IsTaggedValue(val)) {
+                        auto tagged = AsTaggedValue(val);
+                        method = std::move(tagged.method);
+                        payload = std::move(tagged.payload);
+                    }
+                    auto input = payload.cast<InputT>();
 
                     // 调用派生类的 forward()
-                    auto execution_lock = this->AcquireExecutionLock();
+                    if (!method.empty() && method != "forward") {
+                        if constexpr (detail::has_method_table_v<
+                                          Derived,
+                                          std::unordered_map<std::string,
+                                                             OutputT (Derived::*)(InputT)>>) {
+                            static const auto table = Derived::method_table();
+                            auto it = table.find(method);
+                            if (it != table.end()) {
+                                auto fn = it->second;
+                                auto result = (static_cast<Derived*>(this)->*fn)(input);
+                                return Value(std::move(result));
+                            }
+                        }
+                        throw std::runtime_error("Unknown method: " + method);
+                    }
                     auto result = static_cast<Derived*>(this)->forward(input);
 
                     return Value(std::move(result));
@@ -206,11 +245,25 @@ public:
     }
 
     void connect() override {
-        for (auto* upstream : upstreams_) {
+        for (size_t index = 0; index < upstreams_.size(); ++index) {
+            auto* upstream = upstreams_[index];
             auto* sender = upstream ? upstream->get_sender() : nullptr;
             auto* receiver = get_receiver();
             if (sender && receiver) {
-                tbb::flow::make_edge(*sender, *receiver);
+                const auto& method = upstream_methods_[index];
+                if (!method.empty()) {
+                    auto tagger = std::make_unique<tbb::flow::function_node<Value, Value>>(
+                        tbb_node->graph_reference(),
+                        tbb::flow::serial,
+                        [method](Value val) -> Value {
+                            return Value(MethodTaggedValue{method, std::move(val)});
+                        });
+                    tbb::flow::make_edge(*sender, *tagger);
+                    tbb::flow::make_edge(*tagger, *receiver);
+                    tagger_nodes_.push_back(std::move(tagger));
+                } else {
+                    tbb::flow::make_edge(*sender, *receiver);
+                }
             } else {
                 throw std::runtime_error("Failed to connect: missing sender/receiver");
             }
@@ -224,6 +277,9 @@ public:
     tbb::flow::receiver<Value>* get_receiver() override {
         return tbb_node.get();
     }
+
+private:
+    std::vector<std::unique_ptr<tbb::flow::function_node<Value, Value>>> tagger_nodes_;
 };
 
 // ========== TypedMultiInputFunctionNode ==========
@@ -244,7 +300,6 @@ public:
             tbb::flow::serial,
             [this](const JoinTuple& vals) -> Value {
                 try {
-                    auto execution_lock = this->AcquireExecutionLock();
                     auto result = InvokeWithValues(vals,
                                                    std::index_sequence_for<InputTs...>{});
                     return Value(std::move(result));
@@ -300,14 +355,82 @@ private:
         if (!sender) {
             throw std::runtime_error("Failed to connect multi-input: missing sender");
         }
-        tbb::flow::make_edge(*sender, tbb::flow::input_port<Index>(*join_node_));
+        const auto& method = upstream_methods_[Index];
+        if (!method.empty()) {
+            auto tagger = std::make_unique<tbb::flow::function_node<Value, Value>>(
+                join_node_->graph_reference(),
+                tbb::flow::serial,
+                [method](Value val) -> Value {
+                    return Value(MethodTaggedValue{method, std::move(val)});
+                });
+            tbb::flow::make_edge(*sender, *tagger);
+            tbb::flow::make_edge(*tagger, tbb::flow::input_port<Index>(*join_node_));
+            tagger_nodes_.push_back(std::move(tagger));
+        } else {
+            tbb::flow::make_edge(*sender, tbb::flow::input_port<Index>(*join_node_));
+        }
     }
 
     template<size_t... Index>
     OutputT InvokeWithValues(const JoinTuple& vals, std::index_sequence<Index...>) {
-        return static_cast<Derived*>(this)->forward(
-            std::get<Index>(vals).template cast<InputTs>()...);
+        std::array<std::string, sizeof...(InputTs)> methods;
+        methods.fill(std::string());
+        auto result = InvokeWithValuesAndMethods(vals, methods,
+                                                 std::index_sequence<Index...>{});
+        return result;
     }
+
+    template<size_t Index, typename InputT>
+    InputT UnwrapValue(const Value& value,
+                       std::array<std::string, sizeof...(InputTs)>& methods) {
+        if (IsTaggedValue(value)) {
+            auto tagged = AsTaggedValue(value);
+            methods[Index] = tagged.method;
+            return tagged.payload.template cast<InputT>();
+        }
+        return value.template cast<InputT>();
+    }
+
+    template<size_t... Index>
+    OutputT InvokeWithValuesAndMethods(const JoinTuple& vals,
+                                       std::array<std::string, sizeof...(InputTs)>& methods,
+                                       std::index_sequence<Index...>) {
+        auto inputs = std::tuple{UnwrapValue<Index, InputTs>(std::get<Index>(vals), methods)...};
+        bool has_method = !methods.empty() && !methods[0].empty();
+        for (const auto& method : methods) {
+            if (method != methods[0] || method.empty()) {
+                has_method = false;
+                break;
+            }
+        }
+        if (has_method && methods[0] != "forward") {
+            if constexpr (detail::has_method_table_v<
+                              Derived,
+                              std::unordered_map<std::string,
+                                                 OutputT (Derived::*)(InputTs...)>>) {
+                static const auto table = Derived::method_table();
+                auto it = table.find(methods[0]);
+                if (it != table.end()) {
+                    auto fn = it->second;
+                    return std::apply(
+                        [this, fn](auto&&... args) {
+                            return (static_cast<Derived*>(this)->*fn)(
+                                std::forward<decltype(args)>(args)...);
+                        },
+                        inputs);
+                }
+            }
+            throw std::runtime_error("Unknown method: " + methods[0]);
+        }
+        return std::apply(
+            [this](auto&&... args) {
+                return static_cast<Derived*>(this)->forward(
+                    std::forward<decltype(args)>(args)...);
+            },
+            inputs);
+    }
+
+    std::vector<std::unique_ptr<tbb::flow::function_node<Value, Value>>> tagger_nodes_;
 };
 
 // ========== TupleGetNode ==========
