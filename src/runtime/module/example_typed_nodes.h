@@ -3,6 +3,9 @@
 #include "../core_tbb.h"
 #include "../node_registry.h"
 #include <iostream>
+#include <atomic>
+#include <string>
+#include <tuple>
 
 namespace easywork {
 
@@ -72,5 +75,120 @@ public:
 };
 
 EW_REGISTER_NODE(StringPrinter, "StringPrinter")
+
+// 示例：输出 tuple 的节点
+class TupleEmitter : public TypedInputNode<TupleEmitter, std::tuple<int, std::string>> {
+public:
+    TupleEmitter(int start, int max, int step)
+        : current_(start), max_(max), step_(step) {}
+
+    std::tuple<int, std::string> forward(tbb::flow_control* fc) {
+        if (current_ > max_) {
+            if (fc) fc->stop();
+            return {0, ""};
+        }
+        int value = current_;
+        current_ += step_;
+        return {value, "value_" + std::to_string(value)};
+    }
+
+private:
+    int current_;
+    int max_;
+    int step_;
+
+    static inline const bool kTupleRegistered = RegisterTupleType<std::tuple<int, std::string>>();
+};
+
+EW_REGISTER_NODE_3(TupleEmitter, "TupleEmitter",
+                  int, start, 0,
+                  int, max, 5,
+                  int, step, 1)
+
+// 示例：多输入节点
+class IntStringJoiner : public TypedMultiInputFunctionNode<IntStringJoiner, std::string, int, std::string> {
+public:
+    std::string forward(int number, std::string text) {
+        return text + ":" + std::to_string(number);
+    }
+};
+
+EW_REGISTER_NODE(IntStringJoiner, "IntStringJoiner")
+
+class IntAdder : public TypedMultiInputFunctionNode<IntAdder, int, int, int> {
+public:
+    int forward(int left, int right) {
+        return left + right;
+    }
+};
+
+EW_REGISTER_NODE(IntAdder, "IntAdder")
+
+class IntToString : public TypedFunctionNode<IntToString, int, std::string> {
+public:
+    std::string forward(int input) {
+        return std::to_string(input);
+    }
+};
+
+EW_REGISTER_NODE(IntToString, "IntToString")
+
+// Small buffer safety test
+struct SmallTracked {
+    int value;
+    static inline std::atomic<int> live_count{0};
+
+    explicit SmallTracked(int v = 0) : value(v) {
+        ++live_count;
+    }
+
+    SmallTracked(const SmallTracked& other) : value(other.value) {
+        ++live_count;
+    }
+
+    SmallTracked(SmallTracked&& other) noexcept : value(other.value) {
+        ++live_count;
+    }
+
+    ~SmallTracked() {
+        --live_count;
+    }
+};
+
+inline int GetSmallTrackedLiveCount() {
+    return SmallTracked::live_count.load();
+}
+
+inline void ResetSmallTrackedLiveCount() {
+    SmallTracked::live_count.store(0);
+}
+
+class SmallTrackedSource : public TypedInputNode<SmallTrackedSource, SmallTracked> {
+public:
+    explicit SmallTrackedSource(int max) : current_(0), max_(max) {}
+
+    SmallTracked forward(tbb::flow_control* fc) {
+        if (current_ >= max_) {
+            if (fc) fc->stop();
+            return SmallTracked(0);
+        }
+        return SmallTracked(current_++);
+    }
+
+private:
+    int current_;
+    int max_;
+};
+
+EW_REGISTER_NODE_1(SmallTrackedSource, "SmallTrackedSource", int, max, 3)
+
+class SmallTrackedConsumer : public TypedFunctionNode<SmallTrackedConsumer, SmallTracked, int> {
+public:
+    int forward(SmallTracked input) {
+        return input.value;
+    }
+};
+
+EW_REGISTER_NODE(SmallTrackedConsumer, "SmallTrackedConsumer")
 
 } // namespace easywork

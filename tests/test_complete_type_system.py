@@ -82,17 +82,14 @@ def test_type_error_detection():
     try:
         pipeline = TypeCheckPipeline()
         pipeline.validate()
-
-        # 尝试运行 - 应该在 C++ 端捕获类型错误
-        pipeline.run()
-        print("⚠ 运行成功（可能在 C++ 端进行了隐式转换）")
-        return True
+        print("✗ 应该在类型检查阶段抛出 TypeError")
+        return False
     except TypeError as e:
         print(f"✓ 正确检测到类型错误: {e}")
         return True
     except Exception as e:
-        print(f"⚠ 其他错误: {e}")
-        return True
+        print(f"✗ 其他错误: {e}")
+        return False
 
 
 # ========== 测试 3：节点类型信息查询 ==========
@@ -215,6 +212,71 @@ def test_module_dynamic_access():
         return False
 
 
+# ========== 测试 7：Tuple 自动索引与多输入 ==========
+def test_tuple_auto_index_and_multi_input():
+    """测试 tuple 自动解包与多输入节点连接"""
+    print("\n=== 测试 7：Tuple 自动索引与多输入 ===")
+
+    class TuplePipeline(ew.Pipeline):
+        def __init__(self):
+            super().__init__()
+            self.emitter = ew.module.TupleEmitter(start=1, max=3, step=1)
+            self.multiplier = ew.module.IntMultiplier(factor=2)
+            self.joiner = ew.module.IntStringJoiner()
+            self.printer = ew.module.StringPrinter()
+
+        def construct(self):
+            number, text = self.emitter.read()
+            doubled = self.multiplier(number)
+            joined = self.joiner(doubled, text)
+            self.printer(joined)
+
+    try:
+        pipeline = TuplePipeline()
+        pipeline.validate()
+        pipeline.run()
+        print("✓ Tuple 解包与多输入执行成功")
+        return True
+    except Exception as e:
+        print(f"✗ 测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+# ========== 测试 8：Small Buffer 析构安全 ==========
+def test_small_buffer_safety():
+    """测试 SBO 析构是否正确释放小类型"""
+    print("\n=== 测试 8：Small Buffer 析构安全 ===")
+
+    class SmallTrackedPipeline(ew.Pipeline):
+        def __init__(self):
+            super().__init__()
+            self.source = ew.module.SmallTrackedSource(max=3)
+            self.consumer = ew.module.SmallTrackedConsumer()
+
+        def construct(self):
+            value = self.source.read()
+            self.consumer(value)
+
+    try:
+        ew._core.reset_small_tracked_live_count()
+        pipeline = SmallTrackedPipeline()
+        pipeline.validate()
+        pipeline.run()
+        live_count = ew._core.get_small_tracked_live_count()
+        if live_count != 0:
+            print(f"✗ SmallTracked 实例未清理，live_count={live_count}")
+            return False
+        print("✓ SmallTracked 实例已正确析构")
+        return True
+    except Exception as e:
+        print(f"✗ 测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 # ========== 主测试函数 ==========
 def main():
     print("=" * 60)
@@ -230,6 +292,8 @@ def main():
     results.append(("Frame 节点兼容性", test_frame_nodes_compatibility()))
     results.append(("Symbol 和连接", test_symbol_connections()))
     results.append(("模块动态访问", test_module_dynamic_access()))
+    results.append(("Tuple 自动索引与多输入", test_tuple_auto_index_and_multi_input()))
+    results.append(("Small Buffer 析构安全", test_small_buffer_safety()))
 
     # 汇总结果
     print("\n" + "=" * 60)

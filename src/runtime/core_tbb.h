@@ -6,9 +6,14 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
-#include <optional>
 #include <tuple>
 #include <stdexcept>
+#include <type_traits>
+#include <string>
+#include <utility>
+#include <unordered_map>
+#include <mutex>
+#include <functional>
 #include "memory/frame.h"
 #include "type_system.h"
 
@@ -34,25 +39,12 @@ public:
     // Store upstream nodes here, and connect in connect() phase.
     std::vector<Node*> upstreams_;
 
-    // 新增：支持带索引的上游连接（用于 tuple 解包）
-    struct UpstreamInfo {
-        Node* node;
-        std::optional<size_t> tuple_index;  // None 或索引值
-
-        UpstreamInfo(Node* n, std::optional<size_t> idx = std::nullopt)
-            : node(n), tuple_index(idx) {}
-    };
-
-    std::vector<UpstreamInfo> upstreams_info_;
-
     void add_upstream(Node* n) {
         upstreams_.push_back(n);
-        upstreams_info_.emplace_back(n, std::nullopt);
     }
 
-    void add_upstream_with_index(Node* n, std::optional<size_t> index) {
-        upstreams_.push_back(n);
-        upstreams_info_.emplace_back(n, index);
+    void ClearUpstreams() {
+        upstreams_.clear();
     }
 
     // Must be called AFTER build()
@@ -68,6 +60,11 @@ public:
 
     // 新增：获取类型信息（纯虚函数）
     virtual NodeTypeInfo get_type_info() const = 0;
+
+    virtual tbb::flow::sender<Value>* get_sender() { return nullptr; }
+    virtual tbb::flow::receiver<Value>* get_receiver() { return nullptr; }
+
+    const std::vector<Node*>& get_upstreams() const { return upstreams_; }
 };
 
 // ========== TypedInputNode (Source) ==========
@@ -113,6 +110,10 @@ public:
         if (tbb_node) {
             tbb_node->activate();
         }
+    }
+
+    tbb::flow::sender<Value>* get_sender() override {
+        return tbb_node.get();
     }
 };
 
@@ -162,29 +163,22 @@ public:
 
     void connect() override {
         for (auto* upstream : upstreams_) {
-            // 尝试连接到上游节点
-            // 这里简化处理，实际需要更复杂的逻辑来处理不同类型的节点
-            try_connect_to(upstream);
+            auto* sender = upstream ? upstream->get_sender() : nullptr;
+            auto* receiver = get_receiver();
+            if (sender && receiver) {
+                tbb::flow::make_edge(*sender, *receiver);
+            } else {
+                throw std::runtime_error("Failed to connect: missing sender/receiver");
+            }
         }
     }
 
-    // 尝试连接到上游节点
-    void try_connect_to(Node* upstream) {
-        // 注意：这里需要知道上游节点的具体类型才能连接
-        // 暂时使用 dynamic_cast（不够优雅，但可用）
-        // 更好的方案是在 Node 基类中添加虚拟的 connect_to 方法
+    tbb::flow::sender<Value>* get_sender() override {
+        return tbb_node.get();
+    }
 
-        // 对于 Frame 类型的旧节点
-        if (auto input = dynamic_cast<TypedInputNode<class InputNodeTag, Frame>*>(upstream)) {
-            if (input->tbb_node && tbb_node) {
-                tbb::flow::make_edge(*(input->tbb_node), *(this->tbb_node));
-            }
-        } else if (auto func = dynamic_cast<TypedFunctionNode<class FunctionNodeTag, Frame, Frame>*>(upstream)) {
-            if (func->tbb_node && tbb_node) {
-                tbb::flow::make_edge(*(func->tbb_node), *(this->tbb_node));
-            }
-        }
-        // TODO: 添加其他类型的连接逻辑
+    tbb::flow::receiver<Value>* get_receiver() override {
+        return tbb_node.get();
     }
 };
 
@@ -193,30 +187,26 @@ public:
 template<typename Derived, typename OutputT, typename... InputTs>
 class TypedMultiInputFunctionNode : public Node {
 public:
-    using InputTuple = std::tuple<InputTs...>;
     using OutputType = OutputT;
-    std::unique_ptr<tbb::flow::function_node<Value, Value>> tbb_node;
+    using JoinTuple = std::tuple<std::conditional_t<true, Value, InputTs>...>;
+    std::unique_ptr<tbb::flow::join_node<JoinTuple, tbb::flow::queueing>> join_node_;
+    std::unique_ptr<tbb::flow::function_node<JoinTuple, Value>> tbb_node;
 
     void build(ExecutionGraph& g) override {
-        tbb_node = std::make_unique<tbb::flow::function_node<Value, Value>>(
+        join_node_ = std::make_unique<tbb::flow::join_node<JoinTuple, tbb::flow::queueing>>(
+            g.tbb_graph);
+        tbb_node = std::make_unique<tbb::flow::function_node<JoinTuple, Value>>(
             g.tbb_graph,
             tbb::flow::serial,
-            [this](Value val) -> Value {
+            [this](const JoinTuple& vals) -> Value {
                 try {
-                    // 将 Value 转换为输入 tuple
-                    auto input_tuple = val.cast<InputTuple>();
-
-                    // 解包 tuple 并调用派生类的 forward()
-                    auto result = std::apply([this](InputTs... args) {
-                        return static_cast<Derived*>(this)->forward(args...);
-                    }, input_tuple);
-
+                    auto result = InvokeWithValues(vals,
+                                                   std::index_sequence_for<InputTs...>{});
                     return Value(std::move(result));
                 } catch (const std::exception& e) {
                     return Value();
                 }
-            }
-        );
+            });
     }
 
     // 派生类必须实现：OutputT forward(InputTs... inputs)
@@ -234,7 +224,6 @@ public:
 
     void connect() override {
         // 多输入节点：需要将所有上游打包成一个 tuple
-        // 这里需要使用 TupleJoinNode（稍后实现）
         if (upstreams_.size() != sizeof...(InputTs)) {
             throw std::runtime_error(
                 "Expected " + std::to_string(sizeof...(InputTs)) + " inputs, got " +
@@ -242,20 +231,37 @@ public:
             );
         }
 
-        // TODO: 实现 TupleJoinNode 的连接逻辑
-        // 暂时使用简化的连接方式
-        for (auto* upstream : upstreams_) {
-            try_connect_to(upstream);
+        if (!join_node_ || !tbb_node) {
+            throw std::runtime_error("Join node is not initialized");
         }
+
+        ConnectInputs(std::index_sequence_for<InputTs...>{});
+        tbb::flow::make_edge(*join_node_, *tbb_node);
     }
 
-    void try_connect_to(Node* upstream) {
-        // 暂时使用简化的连接逻辑
-        if (auto func = dynamic_cast<TypedFunctionNode<class FunctionNodeTag, Frame, Frame>*>(upstream)) {
-            if (func->tbb_node && tbb_node) {
-                tbb::flow::make_edge(*(func->tbb_node), *(this->tbb_node));
-            }
+    tbb::flow::sender<Value>* get_sender() override {
+        return tbb_node.get();
+    }
+
+private:
+    template<size_t... Index>
+    void ConnectInputs(std::index_sequence<Index...>) {
+        (ConnectInput<Index>(upstreams_[Index]), ...);
+    }
+
+    template<size_t Index>
+    void ConnectInput(Node* upstream) {
+        auto* sender = upstream ? upstream->get_sender() : nullptr;
+        if (!sender) {
+            throw std::runtime_error("Failed to connect multi-input: missing sender");
         }
+        tbb::flow::make_edge(*sender, tbb::flow::input_port<Index>(*join_node_));
+    }
+
+    template<size_t... Index>
+    OutputT InvokeWithValues(const JoinTuple& vals, std::index_sequence<Index...>) {
+        return static_cast<Derived*>(this)->forward(
+            std::get<Index>(vals).template cast<InputTs>()...);
     }
 };
 
@@ -273,6 +279,80 @@ public:
         return std::get<Index>(input);
     }
 };
+
+namespace detail {
+struct TupleRegistryEntry {
+    size_t size;
+    std::function<std::shared_ptr<Node>(size_t)> factory;
+};
+
+inline std::unordered_map<size_t, TupleRegistryEntry>& TupleRegistry() {
+    static std::unordered_map<size_t, TupleRegistryEntry> registry;
+    return registry;
+}
+
+inline std::mutex& TupleRegistryMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+template<typename TupleT, size_t... Index>
+std::shared_ptr<Node> CreateTupleGetNodeForIndex(size_t index,
+                                                 std::index_sequence<Index...>) {
+    std::shared_ptr<Node> node;
+    bool matched = ((index == Index
+                         ? (node = std::make_shared<TupleGetNode<Index, TupleT>>(), true)
+                         : false) || ...);
+    (void)matched;
+    if (!node) {
+        throw std::runtime_error("Unsupported tuple index for TupleGetNode");
+    }
+    return node;
+}
+}  // namespace detail
+
+template<typename TupleT>
+inline bool RegisterTupleType() {
+    static_assert(std::tuple_size_v<TupleT> > 0, "Tuple type must not be empty");
+    const auto type_info = TypeInfo::create<TupleT>();
+    const auto type_key = type_info.type_hash;
+    std::lock_guard<std::mutex> lock(detail::TupleRegistryMutex());
+    auto& registry = detail::TupleRegistry();
+    if (registry.contains(type_key)) {
+        return false;
+    }
+    detail::TupleRegistryEntry entry;
+    entry.size = std::tuple_size_v<TupleT>;
+    entry.factory = [](size_t index) {
+        return detail::CreateTupleGetNodeForIndex<TupleT>(
+            index, std::make_index_sequence<std::tuple_size_v<TupleT>>{});
+    };
+    registry.emplace(type_key, std::move(entry));
+    return true;
+}
+
+inline std::shared_ptr<Node> CreateTupleGetNode(const TypeInfo& tuple_type, size_t index) {
+    std::lock_guard<std::mutex> lock(detail::TupleRegistryMutex());
+    auto& registry = detail::TupleRegistry();
+    auto it = registry.find(tuple_type.type_hash);
+    if (it == registry.end()) {
+        throw std::runtime_error("Tuple type not registered for TupleGetNode");
+    }
+    if (index >= it->second.size) {
+        throw std::runtime_error("Tuple index out of range for TupleGetNode");
+    }
+    return it->second.factory(index);
+}
+
+inline size_t GetTupleSize(const TypeInfo& tuple_type) {
+    std::lock_guard<std::mutex> lock(detail::TupleRegistryMutex());
+    auto& registry = detail::TupleRegistry();
+    auto it = registry.find(tuple_type.type_hash);
+    if (it == registry.end()) {
+        return 0;
+    }
+    return it->second.size;
+}
 
 // ========== 向后兼容的 InputNode 和 FunctionNode ==========
 // 为了让现有代码继续工作，我们需要实际的类而不是别名
@@ -310,6 +390,10 @@ public:
         if (tbb_node) {
             tbb_node->activate();
         }
+    }
+
+    tbb::flow::sender<Value>* get_sender() override {
+        return tbb_node.get();
     }
 };
 
@@ -350,17 +434,22 @@ public:
 
     void connect() override {
         for (auto* upstream : upstreams_) {
-            // 尝试连接到 InputNode
-            if (auto input = dynamic_cast<InputNode*>(upstream)) {
-                if (input->tbb_node && tbb_node) {
-                    tbb::flow::make_edge(*(input->tbb_node), *(this->tbb_node));
-                }
-            } else if (auto func = dynamic_cast<FunctionNode*>(upstream)) {
-                if (func->tbb_node && tbb_node) {
-                    tbb::flow::make_edge(*(func->tbb_node), *(this->tbb_node));
-                }
+            auto* sender = upstream ? upstream->get_sender() : nullptr;
+            auto* receiver = get_receiver();
+            if (sender && receiver) {
+                tbb::flow::make_edge(*sender, *receiver);
+            } else {
+                throw std::runtime_error("Failed to connect: missing sender/receiver");
             }
         }
+    }
+
+    tbb::flow::sender<Value>* get_sender() override {
+        return tbb_node.get();
+    }
+
+    tbb::flow::receiver<Value>* get_receiver() override {
+        return tbb_node.get();
     }
 };
 

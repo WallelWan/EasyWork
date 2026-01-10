@@ -57,7 +57,9 @@ PYBIND11_MODULE(easywork_core, m) {
         .def("connect", &easywork::Node::connect)
         .def("activate", &easywork::Node::Activate)
         .def("set_input", &easywork::Node::set_input)
-        .def_property_readonly("type_info", &easywork::Node::get_type_info);
+        .def("clear_upstreams", &easywork::Node::ClearUpstreams)
+        .def_property_readonly("type_info", &easywork::Node::get_type_info)
+        .def_property_readonly("upstreams", &easywork::Node::get_upstreams);
 
     // ========== Factory (C++20 Auto-Registration) ==========
     py::class_<easywork::NodeRegistry>(m, "_NodeRegistry")
@@ -72,6 +74,28 @@ PYBIND11_MODULE(easywork_core, m) {
                             py::kwargs kwargs) {
         return easywork::NodeRegistry::instance().Create(name, args, kwargs);
     }, py::arg("name"), "Create a node by registered name using the factory pattern");
+
+    m.def("create_tuple_get_node",
+          [](const easywork::TypeInfo& tuple_type, size_t index) {
+              return easywork::CreateTupleGetNode(tuple_type, index);
+          },
+          py::arg("tuple_type"),
+          py::arg("index"),
+          "Create a TupleGetNode for the specified tuple type and index");
+
+    m.def("get_tuple_size",
+          [](const easywork::TypeInfo& tuple_type) {
+              return easywork::GetTupleSize(tuple_type);
+          },
+          py::arg("tuple_type"),
+          "Get the size of a supported tuple type");
+
+    m.def("get_small_tracked_live_count",
+          &easywork::GetSmallTrackedLiveCount,
+          "Get live count for SmallTracked values");
+    m.def("reset_small_tracked_live_count",
+          &easywork::ResetSmallTrackedLiveCount,
+          "Reset live count for SmallTracked values");
 
     // ========== Frame (Zero-Copy Buffer Protocol) ==========
     py::class_<easywork::FrameBuffer, std::shared_ptr<easywork::FrameBuffer>>(

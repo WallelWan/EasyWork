@@ -8,6 +8,7 @@
 #include <type_traits>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 namespace easywork {
 
@@ -89,6 +90,9 @@ public:
     Value() : is_small_(false), has_value_(false) {
         data_ = nullptr;
         type_info_ = TypeInfo::create<void>();
+        destroy_fn_ = nullptr;
+        copy_fn_ = nullptr;
+        move_fn_ = nullptr;
     }
 
     // 从任意类型构造
@@ -98,14 +102,20 @@ public:
 
         // 检查是否适合 small-buffer optimization
         if constexpr (sizeof(CleanT) <= sizeof(buffer_) &&
-                      std::is_trivially_copyable_v<CleanT>) {
+                      alignof(CleanT) <= alignof(decltype(buffer_))) {
             // 使用小缓冲区
             new (&buffer_) CleanT(std::forward<T>(val));
             is_small_ = true;
+            destroy_fn_ = &Destroy<CleanT>;
+            copy_fn_ = &Copy<CleanT>;
+            move_fn_ = &Move<CleanT>;
         } else {
             // 使用堆分配
             data_ = std::make_unique<Model<CleanT>>(std::forward<T>(val));
             is_small_ = false;
+            destroy_fn_ = nullptr;
+            copy_fn_ = nullptr;
+            move_fn_ = nullptr;
         }
 
         type_info_ = TypeInfo::create<CleanT>();
@@ -113,14 +123,21 @@ public:
     }
 
     // 拷贝构造
-    Value(const Value& other) : is_small_(other.is_small_), has_value_(other.has_value_) {
+    Value(const Value& other)
+        : is_small_(other.is_small_),
+          has_value_(other.has_value_),
+          destroy_fn_(other.destroy_fn_),
+          copy_fn_(other.copy_fn_),
+          move_fn_(other.move_fn_) {
         if (!has_value_) return;
 
         type_info_ = other.type_info_;
 
         if (is_small_) {
             // 拷贝小缓冲区
-            std::memcpy(&buffer_, &other.buffer_, sizeof(buffer_));
+            if (copy_fn_) {
+                copy_fn_(&buffer_, &other.buffer_);
+            }
         } else {
             // 深拷贝堆对象
             data_ = other.data_->clone();
@@ -129,7 +146,12 @@ public:
 
     // 移动构造
     Value(Value&& other) noexcept
-        : is_small_(other.is_small_), has_value_(other.has_value_), type_info_(other.type_info_) {
+        : is_small_(other.is_small_),
+          has_value_(other.has_value_),
+          type_info_(other.type_info_),
+          destroy_fn_(other.destroy_fn_),
+          copy_fn_(other.copy_fn_),
+          move_fn_(other.move_fn_) {
         if (!has_value_) {
             data_ = nullptr;
             return;
@@ -137,13 +159,18 @@ public:
 
         if (is_small_) {
             // 移动小缓冲区
-            std::memcpy(&buffer_, &other.buffer_, sizeof(buffer_));
+            if (move_fn_) {
+                move_fn_(&buffer_, &other.buffer_);
+            }
         } else {
             // 移动堆指针
             data_ = std::move(other.data_);
         }
 
         other.has_value_ = false;
+        other.destroy_fn_ = nullptr;
+        other.copy_fn_ = nullptr;
+        other.move_fn_ = nullptr;
     }
 
     // 析构
@@ -159,10 +186,15 @@ public:
             is_small_ = other.is_small_;
             has_value_ = other.has_value_;
             type_info_ = other.type_info_;
+            destroy_fn_ = other.destroy_fn_;
+            copy_fn_ = other.copy_fn_;
+            move_fn_ = other.move_fn_;
 
             if (has_value_) {
                 if (is_small_) {
-                    std::memcpy(&buffer_, &other.buffer_, sizeof(buffer_));
+                    if (copy_fn_) {
+                        copy_fn_(&buffer_, &other.buffer_);
+                    }
                 } else {
                     data_ = other.data_->clone();
                 }
@@ -178,16 +210,24 @@ public:
             is_small_ = other.is_small_;
             has_value_ = other.has_value_;
             type_info_ = other.type_info_;
+            destroy_fn_ = other.destroy_fn_;
+            copy_fn_ = other.copy_fn_;
+            move_fn_ = other.move_fn_;
 
             if (has_value_) {
                 if (is_small_) {
-                    std::memcpy(&buffer_, &other.buffer_, sizeof(buffer_));
+                    if (move_fn_) {
+                        move_fn_(&buffer_, &other.buffer_);
+                    }
                 } else {
                     data_ = std::move(other.data_);
                 }
             }
 
             other.has_value_ = false;
+            other.destroy_fn_ = nullptr;
+            other.copy_fn_ = nullptr;
+            other.move_fn_ = nullptr;
         }
         return *this;
     }
@@ -254,15 +294,19 @@ private:
 
         if (is_small_) {
             // 调用析构函数
-            // 注意：这里简化处理，实际应该正确调用类型 T 的析构函数
-            // 对于 trivially copyable 类型，这通常没问题
-            // 对于复杂类型，需要更精细的处理
+            if (destroy_fn_) {
+                destroy_fn_(&buffer_);
+            }
         } else {
             // 堆对象会自动释放
             data_.reset();
         }
 
         has_value_ = false;
+        data_.reset();
+        destroy_fn_ = nullptr;
+        copy_fn_ = nullptr;
+        move_fn_ = nullptr;
     }
 
     // 成员变量
@@ -271,6 +315,28 @@ private:
     TypeInfo type_info_;                   // 类型信息
     bool is_small_;                        // 是否使用小缓冲区
     bool has_value_;                       // 是否有值
+    using DestroyFn = void(*)(void*);
+    using CopyFn = void(*)(void*, const void*);
+    using MoveFn = void(*)(void*, void*);
+    DestroyFn destroy_fn_;
+    CopyFn copy_fn_;
+    MoveFn move_fn_;
+
+    template<typename T>
+    static void Destroy(void* ptr) {
+        reinterpret_cast<T*>(ptr)->~T();
+    }
+
+    template<typename T>
+    static void Copy(void* dest, const void* src) {
+        new (dest) T(*reinterpret_cast<const T*>(src));
+    }
+
+    template<typename T>
+    static void Move(void* dest, void* src) {
+        new (dest) T(std::move(*reinterpret_cast<T*>(src)));
+        reinterpret_cast<T*>(src)->~T();
+    }
 };
 
 // ========== 辅助函数 ==========
