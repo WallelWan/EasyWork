@@ -186,6 +186,6 @@ public:
 // Unified macro: EW_REGISTER_NODE(Class, "Name", Arg(...), ...)
 #define EW_REGISTER_NODE(Classname, PyName, ...) \
     inline easywork::NodeRegistrar<PyName, Classname> \
-        registrar_##Classname##_(__VA_ARGS__);
+        registrar_##Classname##_{__VA_ARGS__};
 
 } // namespace easywork

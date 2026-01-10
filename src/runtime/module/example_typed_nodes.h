@@ -2,6 +2,7 @@
 
 #include "../core_tbb.h"
 #include "../node_registry.h"
+#include "../macros.h"
 #include <atomic>
 #include <string>
 #include <tuple>
@@ -9,7 +10,7 @@
 
 namespace easywork {
 
-class NumberSource : public TypedInputNode<NumberSource, int> {
+class NumberSource : public TypedMultiInputFunctionNode<NumberSource, int> {
 public:
     NumberSource(int start, int max, int step)
         : current_(start), max_(max), step_(step) {}
@@ -38,7 +39,7 @@ EW_REGISTER_NODE(NumberSource, "NumberSource",
     Arg("step", 1)
 )
 
-class MultiplyBy : public TypedFunctionNode<MultiplyBy, int, int> {
+class MultiplyBy : public TypedMultiInputFunctionNode<MultiplyBy, int, int> {
 public:
     explicit MultiplyBy(int factor) : factor_(factor) {}
 
@@ -52,7 +53,7 @@ private:
 
 EW_REGISTER_NODE(MultiplyBy, "MultiplyBy", Arg("factor", 2))
 
-class IntToText : public TypedFunctionNode<IntToText, int, std::string> {
+class IntToText : public TypedMultiInputFunctionNode<IntToText, std::string, int> {
 public:
     std::string forward(int input) {
         return std::to_string(input);
@@ -61,7 +62,7 @@ public:
 
 EW_REGISTER_NODE(IntToText, "IntToText")
 
-class PrefixText : public TypedFunctionNode<PrefixText, std::string, std::string> {
+class PrefixText : public TypedMultiInputFunctionNode<PrefixText, std::string, std::string> {
 public:
     explicit PrefixText(std::string prefix) : prefix_(std::move(prefix)) {}
 
@@ -75,7 +76,7 @@ private:
 
 EW_REGISTER_NODE(PrefixText, "PrefixText", Arg("prefix", std::string("[Prefix] ")))
 
-class PairEmitter : public TypedInputNode<PairEmitter, std::tuple<int, std::string>> {
+class PairEmitter : public TypedMultiInputFunctionNode<PairEmitter, std::tuple<int, std::string>> {
 public:
     PairEmitter(int start, int max)
         : current_(start), max_(max) {}
@@ -123,7 +124,7 @@ struct SmallTracked {
 inline int GetSmallTrackedLiveCount() { return SmallTracked::live_count.load(); }
 inline void ResetSmallTrackedLiveCount() { SmallTracked::live_count.store(0); }
 
-class SmallTrackedSource : public TypedInputNode<SmallTrackedSource, SmallTracked> {
+class SmallTrackedSource : public TypedMultiInputFunctionNode<SmallTrackedSource, SmallTracked> {
 public:
     explicit SmallTrackedSource(int max) : current_(0), max_(max) {}
 
@@ -144,7 +145,7 @@ private:
 
 EW_REGISTER_NODE(SmallTrackedSource, "SmallTrackedSource", Arg("max", 3))
 
-class SmallTrackedConsumer : public TypedFunctionNode<SmallTrackedConsumer, SmallTracked, int> {
+class SmallTrackedConsumer : public TypedMultiInputFunctionNode<SmallTrackedConsumer, int, SmallTracked> {
 public:
     int forward(SmallTracked input) {
         return input.value;
@@ -153,7 +154,7 @@ public:
 
 EW_REGISTER_NODE(SmallTrackedConsumer, "SmallTrackedConsumer")
 
-class MethodDispatchRecorder : public TypedFunctionNode<MethodDispatchRecorder, int, int> {
+class MethodDispatchRecorder : public TypedMultiInputFunctionNode<MethodDispatchRecorder, int, int> {
 public:
     int forward(int input) {
         ++forward_count;
@@ -170,17 +171,7 @@ public:
         return input;
     }
 
-    std::vector<std::string> exposed_methods() const override {
-        return {"forward", "left", "right"};
-    }
-
-    static std::unordered_map<std::string, int (MethodDispatchRecorder::*)(int)>
-    method_table() {
-        return {
-            {"left", &MethodDispatchRecorder::left},
-            {"right", &MethodDispatchRecorder::right},
-        };
-    }
+    EW_EXPORT_METHODS(left, right)
 
     static inline std::atomic<int> left_count{0};
     static inline std::atomic<int> right_count{0};

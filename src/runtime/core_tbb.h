@@ -1,5 +1,6 @@
 #pragma once
 
+#include <iostream>
 #include <tbb/flow_graph.h>
 #include <array>
 #include <memory>
@@ -114,256 +115,177 @@ inline constexpr bool has_method_table_v = requires {
 template<typename TupleT>
 bool RegisterTupleType();
 
-// ========== TypedInputNode (Source) ==========
-// 模板化的输入节点，支持任意输出类型
-template<typename Derived, typename OutputT>
-class TypedInputNode : public Node {
-public:
-    TypedInputNode() {
-        if constexpr (detail::is_tuple_v<OutputT>) {
-            static const bool _registered = RegisterTupleType<OutputT>();
-            (void)_registered;
-        }
-    }
-
-    using OutputType = OutputT;
-    std::unique_ptr<tbb::flow::input_node<Value>> tbb_node;
-
-    void build(ExecutionGraph& g) override {
-        tbb_node = std::make_unique<tbb::flow::input_node<Value>>(
-            g.tbb_graph,
-            [this](tbb::flow_control& fc) -> Value {
-                // 调用派生类的 forward()
-                auto result = static_cast<Derived*>(this)->forward(&fc);
-
-                // 如果返回 nullptr（针对 Frame 类型），终止流
-                if constexpr (std::is_same_v<OutputT, Frame>) {
-                    if (!result) {
-                        fc.stop();
-                        return Value(nullptr);
-                    }
-                }
-
-                return Value(std::move(result));
-            }
-        );
-    }
-
-    // 派生类必须实现：OutputT forward(tbb::flow_control* fc)
-    // FlowControl* fc 用于终止流（可选）
-
-    NodeTypeInfo get_type_info() const override {
-        return NodeTypeInfo{{}, {TypeInfo::create<OutputT>()}};
-    }
-
-    void connect() override {
-        // Source node 没有上游连接
-    }
-
-    void Activate() override {
-        if (tbb_node) {
-            tbb_node->activate();
-        }
-    }
-
-    tbb::flow::sender<Value>* get_sender() override {
-        return tbb_node.get();
-    }
-};
-
-// ========== TypedFunctionNode (Process + Sink Unified) ==========
-// 模板化的函数节点，支持任意输入输出类型
-template<typename Derived, typename InputT, typename OutputT>
-class TypedFunctionNode : public Node {
-public:
-    TypedFunctionNode() {
-        if constexpr (detail::is_tuple_v<OutputT>) {
-            static const bool _registered = RegisterTupleType<OutputT>();
-            (void)_registered;
-        }
-    }
-
-    using InputType = InputT;
-    using OutputType = OutputT;
-    std::unique_ptr<tbb::flow::function_node<Value, Value>> tbb_node;
-
-    void build(ExecutionGraph& g) override {
-        tbb_node = std::make_unique<tbb::flow::function_node<Value, Value>>(
-            g.tbb_graph,
-            tbb::flow::serial,
-            [this](Value val) -> Value {
-                try {
-                    // 将 Value 转换为输入类型
-                    std::string method;
-                    Value payload = val;
-                    if (IsTaggedValue(val)) {
-                        auto tagged = AsTaggedValue(val);
-                        method = std::move(tagged.method);
-                        payload = std::move(tagged.payload);
-                    }
-                    auto input = payload.cast<InputT>();
-
-                    // 调用派生类的 forward()
-                    if (!method.empty() && method != "forward") {
-                        if constexpr (detail::has_method_table_v<
-                                          Derived,
-                                          std::unordered_map<std::string,
-                                                             OutputT (Derived::*)(InputT)>>) {
-                            static const auto table = Derived::method_table();
-                            auto it = table.find(method);
-                            if (it != table.end()) {
-                                auto fn = it->second;
-                                auto result = (static_cast<Derived*>(this)->*fn)(input);
-                                return Value(std::move(result));
-                            }
-                        }
-                        throw std::runtime_error("Unknown method: " + method);
-                    }
-                    auto result = static_cast<Derived*>(this)->forward(input);
-
-                    return Value(std::move(result));
-                } catch (const std::exception& e) {
-                    // 类型转换或执行失败
-                    // 返回空 Value 或抛出异常
-                    return Value();
-                }
-            }
-        );
-    }
-
-    // 派生类必须实现：OutputT forward(InputT input)
-
-    NodeTypeInfo get_type_info() const override {
-        return NodeTypeInfo{
-            {TypeInfo::create<InputT>()},
-            {TypeInfo::create<OutputT>()}
-        };
-    }
-
-    void set_input(Node* upstream) override {
-        add_upstream(upstream);
-    }
-
-    void connect() override {
-        for (size_t index = 0; index < upstreams_.size(); ++index) {
-            auto* upstream = upstreams_[index];
-            auto* sender = upstream ? upstream->get_sender() : nullptr;
-            auto* receiver = get_receiver();
-            if (sender && receiver) {
-                const auto& method = upstream_methods_[index];
-                if (!method.empty()) {
-                    auto tagger = std::make_unique<tbb::flow::function_node<Value, Value>>(
-                        tbb_node->graph_reference(),
-                        tbb::flow::serial,
-                        [method](Value val) -> Value {
-                            return Value(MethodTaggedValue{method, std::move(val)});
-                        });
-                    tbb::flow::make_edge(*sender, *tagger);
-                    tbb::flow::make_edge(*tagger, *receiver);
-                    tagger_nodes_.push_back(std::move(tagger));
-                } else {
-                    tbb::flow::make_edge(*sender, *receiver);
-                }
-            } else {
-                throw std::runtime_error("Failed to connect: missing sender/receiver");
-            }
-        }
-    }
-
-    tbb::flow::sender<Value>* get_sender() override {
-        return tbb_node.get();
-    }
-
-    tbb::flow::receiver<Value>* get_receiver() override {
-        return tbb_node.get();
-    }
-
-private:
-    std::vector<std::unique_ptr<tbb::flow::function_node<Value, Value>>> tagger_nodes_;
-};
-
 // ========== TypedMultiInputFunctionNode ==========
-// 多输入函数节点，支持 forward(Input1, Input2, ...)
+// Comprehensive base class handling both Sources (0 inputs) and Functions (N inputs)
 template<typename Derived, typename OutputT, typename... InputTs>
 class TypedMultiInputFunctionNode : public Node {
 public:
     using OutputType = OutputT;
-    using JoinTuple = std::tuple<std::conditional_t<true, Value, InputTs>...>;
-    std::unique_ptr<tbb::flow::join_node<JoinTuple, tbb::flow::queueing>> join_node_;
-    std::unique_ptr<tbb::flow::function_node<JoinTuple, Value>> tbb_node;
+    using Self = Derived;
+    using MethodSignature = OutputT (Derived::*)(InputTs...);
 
-    void build(ExecutionGraph& g) override {
-        join_node_ = std::make_unique<tbb::flow::join_node<JoinTuple, tbb::flow::queueing>>(
-            g.tbb_graph);
-        tbb_node = std::make_unique<tbb::flow::function_node<JoinTuple, Value>>(
-            g.tbb_graph,
-            tbb::flow::serial,
-            [this](const JoinTuple& vals) -> Value {
-                try {
-                    auto result = InvokeWithValues(vals,
-                                                   std::index_sequence_for<InputTs...>{});
-                    return Value(std::move(result));
-                } catch (const std::exception& e) {
-                    return Value();
-                }
-            });
+    static constexpr bool IsSource = (sizeof...(InputTs) == 0);
+
+    // Types for Function logic (N inputs)
+    using JoinTuple = std::tuple<std::conditional_t<true, Value, InputTs>...>;
+    
+    // Conditional member types
+    using InputNodeT = tbb::flow::input_node<Value>;
+    using JoinNodeT = std::conditional_t<IsSource, 
+        tbb::flow::join_node<std::tuple<Value>, tbb::flow::queueing>, // Dummy type
+        tbb::flow::join_node<JoinTuple, tbb::flow::queueing>>;
+    using FuncNodeT = std::conditional_t<IsSource,
+        tbb::flow::function_node<std::tuple<Value>, Value>, // Dummy type
+        tbb::flow::function_node<JoinTuple, Value>>;
+
+    // Members
+    // For Source
+    std::unique_ptr<InputNodeT> input_node_;
+    // For Function
+    std::unique_ptr<JoinNodeT> join_node_;
+    std::unique_ptr<FuncNodeT> func_node_;
+    
+    tbb::flow::graph* graph_ = nullptr;
+    std::vector<std::unique_ptr<tbb::flow::function_node<Value, Value>>> tagger_nodes_;
+
+    TypedMultiInputFunctionNode() {
+        if constexpr (detail::is_tuple_v<OutputT>) {
+            static const bool _registered = RegisterTupleType<OutputT>();
+            (void)_registered;
+        }
     }
 
-    // 派生类必须实现：OutputT forward(InputTs... inputs)
+    void build(ExecutionGraph& g) override {
+        graph_ = &g.tbb_graph;
+        
+        if constexpr (IsSource) {
+            input_node_ = std::make_unique<InputNodeT>(
+                g.tbb_graph,
+                [this](tbb::flow_control& fc) -> Value {
+                    // Call Derived::forward(tbb::flow_control*)
+                    auto result = static_cast<Derived*>(this)->forward(&fc);
+
+                    // Special handling for Frame: stop if null
+                    if constexpr (std::is_same_v<OutputT, Frame>) {
+                        if (!result) {
+                            fc.stop();
+                            return Value(nullptr);
+                        }
+                    }
+                    return Value(std::move(result));
+                }
+            );
+        } else {
+            join_node_ = std::make_unique<JoinNodeT>(g.tbb_graph);
+            func_node_ = std::make_unique<FuncNodeT>(
+                g.tbb_graph,
+                tbb::flow::serial,
+                [this](const JoinTuple& vals) -> Value {
+                    try {
+                        auto result = InvokeWithValues(vals,
+                                                     std::index_sequence_for<InputTs...>{});
+                        return Value(std::move(result));
+                    } catch (const std::exception& e) {
+                        return Value(); // Or handle error
+                    }
+                }
+            );
+        }
+    }
 
     NodeTypeInfo get_type_info() const override {
         return NodeTypeInfo{
-            {TypeInfo::create<InputTs>()...},  // 多个输入类型
+            {TypeInfo::create<InputTs>()...},
             {TypeInfo::create<OutputT>()}
         };
     }
 
     void set_input(Node* upstream) override {
+        if constexpr (IsSource) {
+             throw std::runtime_error("Cannot set input on a Source node (TypedMultiInputFunctionNode with 0 inputs)");
+        }
         add_upstream(upstream);
     }
 
     void connect() override {
-        // 多输入节点：需要将所有上游打包成一个 tuple
-        if (upstreams_.size() != sizeof...(InputTs)) {
-            throw std::runtime_error(
-                "Expected " + std::to_string(sizeof...(InputTs)) + " inputs, got " +
-                std::to_string(upstreams_.size())
-            );
-        }
+        if constexpr (IsSource) {
+            // Sources don't have upstreams
+        } else {
+            if (!join_node_ || !func_node_) {
+                throw std::runtime_error("Internal nodes not initialized");
+            }
 
-        if (!join_node_ || !tbb_node) {
-            throw std::runtime_error("Join node is not initialized");
-        }
+            if constexpr (sizeof...(InputTs) == 1) {
+                // Single input: Allow multiple upstreams (multiplexing)
+                if (upstreams_.empty()) {
+                    throw std::runtime_error("Expected at least 1 input, got 0");
+                }
+                for (size_t i = 0; i < upstreams_.size(); ++i) {
+                    ConnectInput<0>(upstreams_[i], upstream_methods_[i]);
+                }
+            } else {
+                // Multi-input: Strict 1:1 mapping
+                if (upstreams_.size() != sizeof...(InputTs)) {
+                    throw std::runtime_error(
+                        "Expected " + std::to_string(sizeof...(InputTs)) + " inputs, got " +
+                        std::to_string(upstreams_.size())
+                    );
+                }
+                ConnectInputs(std::index_sequence_for<InputTs...>{});
+            }
 
-        ConnectInputs(std::index_sequence_for<InputTs...>{});
-        tbb::flow::make_edge(*join_node_, *tbb_node);
+            tbb::flow::make_edge(*join_node_, *func_node_);
+        }
+    }
+
+    void Activate() override {
+        if constexpr (IsSource) {
+            if (input_node_) {
+                input_node_->activate();
+            }
+        }
     }
 
     tbb::flow::sender<Value>* get_sender() override {
-        return tbb_node.get();
+        if constexpr (IsSource) {
+            return input_node_.get();
+        } else {
+            return func_node_.get();
+        }
+    }
+
+    tbb::flow::receiver<Value>* get_receiver() override {
+        return nullptr;
     }
 
 private:
+    // Helper methods for Function Logic
     template<size_t... Index>
     void ConnectInputs(std::index_sequence<Index...>) {
-        (ConnectInput<Index>(upstreams_[Index]), ...);
+        (ConnectInput<Index>(upstreams_[Index], upstream_methods_[Index]), ...);
     }
 
     template<size_t Index>
-    void ConnectInput(Node* upstream) {
-        auto* sender = upstream ? upstream->get_sender() : nullptr;
-        if (!sender) {
-            throw std::runtime_error("Failed to connect multi-input: missing sender");
+    void ConnectInput(Node* upstream, const std::string& method) {
+        if (!upstream) {
+             std::cerr << "TypedMultiInputFunctionNode::ConnectInput: upstream is null" << std::endl;
+             return;
         }
-        const auto& method = upstream_methods_[Index];
+        auto* sender = upstream->get_sender();
+        if (!sender) {
+            std::cerr << "TypedMultiInputFunctionNode::ConnectInput: sender is null" << std::endl;
+            throw std::runtime_error("Failed to connect: missing sender");
+        }
+        
         if (!method.empty()) {
             auto tagger = std::make_unique<tbb::flow::function_node<Value, Value>>(
-                join_node_->graph_reference(),
+                *graph_,
                 tbb::flow::serial,
                 [method](Value val) -> Value {
                     return Value(MethodTaggedValue{method, std::move(val)});
                 });
             tbb::flow::make_edge(*sender, *tagger);
+            // Input ports are on join_node_
             tbb::flow::make_edge(*tagger, tbb::flow::input_port<Index>(*join_node_));
             tagger_nodes_.push_back(std::move(tagger));
         } else {
@@ -395,7 +317,7 @@ private:
     OutputT InvokeWithValuesAndMethods(const JoinTuple& vals,
                                        std::array<std::string, sizeof...(InputTs)>& methods,
                                        std::index_sequence<Index...>) {
-        auto inputs = std::tuple{UnwrapValue<Index, InputTs>(std::get<Index>(vals), methods)...};
+        std::tuple<InputTs...> inputs(UnwrapValue<Index, InputTs>(std::get<Index>(vals), methods)...);
         bool has_method = !methods.empty() && !methods[0].empty();
         for (const auto& method : methods) {
             if (method != methods[0] || method.empty()) {
@@ -429,17 +351,15 @@ private:
             },
             inputs);
     }
-
-    std::vector<std::unique_ptr<tbb::flow::function_node<Value, Value>>> tagger_nodes_;
 };
 
 // ========== TupleGetNode ==========
 // Tuple 自动索引节点（内部使用）
 template<size_t Index, typename TupleT>
-class TupleGetNode : public TypedFunctionNode<
+class TupleGetNode : public TypedMultiInputFunctionNode<
     TupleGetNode<Index, TupleT>,
-    TupleT,
-    std::tuple_element_t<Index, TupleT>> {
+    std::tuple_element_t<Index, TupleT>,
+    TupleT> {
 public:
     using ElementType = std::tuple_element_t<Index, TupleT>;
 

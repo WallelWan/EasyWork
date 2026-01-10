@@ -230,6 +230,12 @@ def test_small_buffer_safety():
         pipeline = SmallTrackedPipeline()
         pipeline.validate()
         pipeline.run()
+        
+        # Explicitly release pipeline to verify cleanup
+        del pipeline
+        import gc
+        gc.collect()
+        
         live_count = ew._core.get_small_tracked_live_count()
         if live_count != 0:
             print(f"✗ SmallTracked 实例未清理，live_count={live_count}")

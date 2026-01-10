@@ -253,11 +253,16 @@ class Pipeline:
                         f"(got {len(upstreams)})")
                 continue
 
+            # Support Fan-In: If node expects 1 input but gets multiple, check all against the single input type
+            is_fan_in = False
             if len(upstreams) != len(type_info.input_types):
-                errors.append(
-                    f"Type mismatch: node expects {len(type_info.input_types)} inputs "
-                    f"but got {len(upstreams)}")
-                continue
+                if len(type_info.input_types) == 1 and len(upstreams) > 1:
+                    is_fan_in = True
+                else:
+                    errors.append(
+                        f"Type mismatch: node expects {len(type_info.input_types)} inputs "
+                        f"but got {len(upstreams)}")
+                    continue
 
             for idx, upstream in enumerate(upstreams):
                 upstream_type = upstream.type_info
@@ -269,9 +274,12 @@ class Pipeline:
                     errors.append(
                         f"Type mismatch: upstream node has multiple outputs at input {idx}")
                     continue
-                if upstream_type.output_types[0] != type_info.input_types[idx]:
+                
+                expected_type = type_info.input_types[0] if is_fan_in else type_info.input_types[idx]
+                
+                if upstream_type.output_types[0] != expected_type:
                     errors.append(
-                        f"Type mismatch: expected {type_info.input_types[idx].name} "
+                        f"Type mismatch: expected {expected_type.name} "
                         f"but got {upstream_type.output_types[0].name} at input {idx}")
 
         if errors:
