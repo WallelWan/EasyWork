@@ -29,16 +29,8 @@ message(STATUS "C++20 support confirmed")
 find_package(OpenCV REQUIRED)
 message(STATUS "OpenCV Version: ${OpenCV_VERSION}")
 
-# TBB (Required, prefer oneTBB 2021+)
-find_package(TBB 2021 QUIET CONFIG)
-if(NOT TBB_FOUND)
-    find_package(TBB QUIET)
-    if(NOT TBB_FOUND)
-        find_package(PkgConfig REQUIRED)
-        pkg_check_modules(TBB REQUIRED tbb>=2021)
-    endif()
-endif()
-message(STATUS "TBB Found: ${TBB_VERSION}")
+# Taskflow (Header-Only)
+message(STATUS "Using Taskflow from extern/taskflow")
 
 # spdlog (Force build from source for ABI compatibility)
 include(FetchContent)
@@ -88,8 +80,8 @@ endif()
 # Include Directories
 include_directories(
     src
+    extern/taskflow
     ${OpenCV_INCLUDE_DIRS}
-    ${TBB_INCLUDE_DIRS}
 )
 
 # Source Files
@@ -106,17 +98,7 @@ pybind11_add_module(easywork_core ${SOURCES})
 target_link_libraries(easywork_core PRIVATE
     ${OpenCV_LIBS}
     spdlog::spdlog
-    ${TBB_LIBRARIES}
 )
-
-if(TARGET TBB::tbb)
-    target_link_libraries(easywork_core PRIVATE TBB::tbb)
-endif()
-
-# For TBB PkgConfig, we might need manual link directories
-if(TBB_LIBRARY_DIRS)
-    target_link_directories(easywork_core PRIVATE ${TBB_LIBRARY_DIRS})
-endif()
 
 # Output directory
 set_target_properties(easywork_core PROPERTIES 

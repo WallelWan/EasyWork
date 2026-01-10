@@ -36,8 +36,8 @@
 
 // Helpers for specific tasks
 #define EW_STRINGIFY_METHOD(x) , #x
-// Use { "name", &Self::name } format. 
-#define EW_PAIR_METHOD_ENTRY(x) { #x, &Self::x },
+// Use { hash("name"), &Self::name } format. 
+#define EW_PAIR_METHOD_ENTRY(x) { easywork::hash_string(#x), &Self::x },
 
 // =========================================================================
 // Main Export Macro
@@ -57,7 +57,7 @@
         return { "forward" EW_FOR_EACH(EW_STRINGIFY_METHOD, __VA_ARGS__) }; \
     } \
     \
-    static std::unordered_map<std::string, MethodSignature> method_table() { \
+    static std::unordered_map<size_t, MethodSignature> method_table() { \
         return { \
             EW_FOR_EACH(EW_PAIR_METHOD_ENTRY, __VA_ARGS__) \
         }; \

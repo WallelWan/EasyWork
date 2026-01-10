@@ -23,17 +23,6 @@ concept NodeType = std::derived_from<T, Node> && requires(ExecutionGraph& g) {
     { std::declval<T&>().get_type_info() } -> std::convertible_to<NodeTypeInfo>;
 };
 
-// ========== Compile-time String Hashing ==========
-
-constexpr std::size_t hash_string(std::string_view str) noexcept {
-    std::size_t hash = 14695981039346656037ULL;
-    for (char c : str) {
-        hash ^= static_cast<std::size_t>(c);
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
 // ========== String Literal as NTTP ==========
 
 template<std::size_t N>

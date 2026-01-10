@@ -14,6 +14,17 @@
 
 namespace easywork {
 
+// ========== Compile-time String Hashing ==========
+
+constexpr std::size_t hash_string(std::string_view str) noexcept {
+    std::size_t hash = 14695981039346656037ULL;
+    for (char c : str) {
+        hash ^= static_cast<std::size_t>(c);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 // ========== TypeInfo ==========
 // 类型描述符，存储类型的运行时信息
 struct TypeInfo {
@@ -41,16 +52,6 @@ struct TypeInfo {
 
     bool operator!=(const TypeInfo& other) const {
         return !(*this == other);
-    }
-
-private:
-    static constexpr size_t hash_string(std::string_view str) noexcept {
-        size_t hash = 14695981039346656037ULL;
-        for (char c : str) {
-            hash ^= static_cast<size_t>(c);
-            hash *= 1099511628211ULL;
-        }
-        return hash;
     }
 };
 
