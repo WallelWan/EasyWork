@@ -71,7 +71,7 @@ RegisterTupleType<std::tuple<int, std::string>>();
 | FunctionNode | 处理节点（输入/输出） |
 | SinkNode | 消费节点 |
 
-推荐实现 `TypedInputNode`、`TypedFunctionNode` 或 `TypedMultiInputFunctionNode` 以获得完整类型信息。
+推荐实现 `TypedInputNode`、`TypedFunctionNode` 或 `BaseNode` 以获得完整类型信息。
 
 ## 6. 扩展节点
 

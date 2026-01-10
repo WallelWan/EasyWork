@@ -166,10 +166,10 @@ inline constexpr bool has_method_table_v = requires {
 template<typename TupleT>
 bool RegisterTupleType();
 
-// ========== TypedMultiInputFunctionNode ==========
+// ========== BaseNode ==========
 
 template<typename Derived, typename OutputT, typename... InputTs>
-class TypedMultiInputFunctionNode : public Node {
+class BaseNode : public Node {
 public:
     using OutputType = OutputT;
     using Self = Derived;
@@ -178,7 +178,7 @@ public:
     static constexpr bool IsSource = (sizeof...(InputTs) == 0);
     using JoinTuple = std::tuple<std::conditional_t<true, Value, InputTs>...>;
 
-    TypedMultiInputFunctionNode() {
+    BaseNode() {
         if constexpr (detail::is_tuple_v<OutputT>) {
             static const bool _registered = RegisterTupleType<OutputT>();
             (void)_registered;
@@ -366,7 +366,7 @@ private:
 // ========== TupleGetNode ==========
 
 template<size_t Index, typename TupleT>
-class TupleGetNode : public TypedMultiInputFunctionNode<
+class TupleGetNode : public BaseNode<
     TupleGetNode<Index, TupleT>,
     std::tuple_element_t<Index, TupleT>,
     TupleT> {

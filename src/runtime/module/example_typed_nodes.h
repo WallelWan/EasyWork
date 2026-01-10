@@ -10,7 +10,7 @@
 
 namespace easywork {
 
-class NumberSource : public TypedMultiInputFunctionNode<NumberSource, int> {
+class NumberSource : public BaseNode<NumberSource, int> {
 public:
     NumberSource(int start, int max, int step)
         : current_(start), max_(max), step_(step) {}
@@ -39,7 +39,7 @@ EW_REGISTER_NODE(NumberSource, "NumberSource",
     Arg("step", 1)
 )
 
-class MultiplyBy : public TypedMultiInputFunctionNode<MultiplyBy, int, int> {
+class MultiplyBy : public BaseNode<MultiplyBy, int, int> {
 public:
     explicit MultiplyBy(int factor) : factor_(factor) {}
 
@@ -53,7 +53,7 @@ private:
 
 EW_REGISTER_NODE(MultiplyBy, "MultiplyBy", Arg("factor", 2))
 
-class IntToText : public TypedMultiInputFunctionNode<IntToText, std::string, int> {
+class IntToText : public BaseNode<IntToText, std::string, int> {
 public:
     std::string forward(int input) {
         return std::to_string(input);
@@ -62,7 +62,7 @@ public:
 
 EW_REGISTER_NODE(IntToText, "IntToText")
 
-class PrefixText : public TypedMultiInputFunctionNode<PrefixText, std::string, std::string> {
+class PrefixText : public BaseNode<PrefixText, std::string, std::string> {
 public:
     explicit PrefixText(std::string prefix) : prefix_(std::move(prefix)) {}
 
@@ -76,7 +76,7 @@ private:
 
 EW_REGISTER_NODE(PrefixText, "PrefixText", Arg("prefix", std::string("[Prefix] ")))
 
-class PairEmitter : public TypedMultiInputFunctionNode<PairEmitter, std::tuple<int, std::string>> {
+class PairEmitter : public BaseNode<PairEmitter, std::tuple<int, std::string>> {
 public:
     PairEmitter(int start, int max)
         : current_(start), max_(max) {}
@@ -102,7 +102,7 @@ EW_REGISTER_NODE(PairEmitter, "PairEmitter",
     Arg("max", 5)
 )
 
-class PairJoiner : public TypedMultiInputFunctionNode<PairJoiner, std::string, int, std::string> {
+class PairJoiner : public BaseNode<PairJoiner, std::string, int, std::string> {
 public:
     std::string forward(int number, std::string text) {
         return text + ":" + std::to_string(number);
@@ -124,7 +124,7 @@ struct SmallTracked {
 inline int GetSmallTrackedLiveCount() { return SmallTracked::live_count.load(); }
 inline void ResetSmallTrackedLiveCount() { SmallTracked::live_count.store(0); }
 
-class SmallTrackedSource : public TypedMultiInputFunctionNode<SmallTrackedSource, SmallTracked> {
+class SmallTrackedSource : public BaseNode<SmallTrackedSource, SmallTracked> {
 public:
     explicit SmallTrackedSource(int max) : current_(0), max_(max) {}
 
@@ -145,7 +145,7 @@ private:
 
 EW_REGISTER_NODE(SmallTrackedSource, "SmallTrackedSource", Arg("max", 3))
 
-class SmallTrackedConsumer : public TypedMultiInputFunctionNode<SmallTrackedConsumer, int, SmallTracked> {
+class SmallTrackedConsumer : public BaseNode<SmallTrackedConsumer, int, SmallTracked> {
 public:
     int forward(SmallTracked input) {
         return input.value;
@@ -154,7 +154,7 @@ public:
 
 EW_REGISTER_NODE(SmallTrackedConsumer, "SmallTrackedConsumer")
 
-class MethodDispatchRecorder : public TypedMultiInputFunctionNode<MethodDispatchRecorder, int, int> {
+class MethodDispatchRecorder : public BaseNode<MethodDispatchRecorder, int, int> {
 public:
     MethodDispatchRecorder() = default;
 
