@@ -73,8 +73,8 @@ class NodeWrapper:
         symbol = _resolve_symbol(input_symbol)
         self._cpp_node.set_input(symbol.producer_node)
 
-    def __call__(self, *args, **kwargs):
-        """Enable calling the node directly (like module(x))."""
+    def _call_method(self, method_name, *args, **kwargs):
+        """Call a named method on the node."""
         if not args:
             raise ValueError("Node requires at least one input")
 
@@ -83,17 +83,31 @@ class NodeWrapper:
 
         if len(args) == 1:
             symbol = _resolve_symbol(args[0])
-            self._cpp_node.set_input(symbol.producer_node)
+            self._cpp_node.set_input_for(method_name, symbol.producer_node)
             return Symbol(self._cpp_node)
 
         if len(args) > 1:
             for symbol in args:
                 resolved = _resolve_symbol(symbol)
-                self._cpp_node.set_input(resolved.producer_node)
+                self._cpp_node.set_input_for(method_name, resolved.producer_node)
             return Symbol(self._cpp_node)
 
         raise NotImplementedError("This node is not callable")
 
+    def __call__(self, *args, **kwargs):
+        """Enable calling the node directly (like module(x))."""
+        return self._call_method("forward", *args, **kwargs)
+
+    def __getattr__(self, name):
+        exposed_methods = self._cpp_node.exposed_methods
+        if name in exposed_methods:
+            def _method(*args, **kwargs):
+                return self._call_method(name, *args, **kwargs)
+            return _method
+        raise AttributeError(f"'{self.__class__.__name__}' has no attribute '{name}'")
+
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | set(self._cpp_node.exposed_methods))
 
 def _get_active_pipeline():
     if _ACTIVE_PIPELINE is None:
@@ -124,7 +138,7 @@ def _resolve_symbol(symbol):
 class _DynamicModule:
     """Dynamic access to C++ registered nodes using factory pattern.
 
-    Allows accessing nodes as: ew.module.CameraSource(), ew.module.CannyFilter(), etc.
+    Allows accessing nodes as: ew.module.NumberSource(), ew.module.MultiplyBy(), etc.
     """
 
     def __init__(self):

@@ -57,8 +57,10 @@ PYBIND11_MODULE(easywork_core, m) {
         .def("connect", &easywork::Node::connect)
         .def("activate", &easywork::Node::Activate)
         .def("set_input", &easywork::Node::set_input)
+        .def("set_input_for", &easywork::Node::set_input_for)
         .def("clear_upstreams", &easywork::Node::ClearUpstreams)
         .def_property_readonly("type_info", &easywork::Node::get_type_info)
+        .def_property_readonly("exposed_methods", &easywork::Node::exposed_methods)
         .def_property_readonly("upstreams", &easywork::Node::get_upstreams);
 
     // ========== Factory (C++20 Auto-Registration) ==========
@@ -122,7 +124,6 @@ PYBIND11_MODULE(easywork_core, m) {
         .def("build", &easywork::PyFuncNode::build)
         .def("set_input", &easywork::PyFuncNode::set_input);
 
-    // Note: All other nodes (CameraSource, CannyFilter, NullSink, VideoWriterSink)
-    // are automatically available through the factory pattern.
-    // Use ew.module.CameraSource(), ew.module.CannyFilter(), etc. in Python.
+    // Note: All other nodes are automatically available through the factory pattern.
+    // Use ew.module.NumberSource(), ew.module.MultiplyBy(), etc. in Python.
 }

@@ -58,13 +58,29 @@ public:
         add_upstream(upstream);
     }
 
+    virtual void set_input_for(const std::string& method, Node* upstream) {
+        (void)method;
+        set_input(upstream);
+    }
+
     // 新增：获取类型信息（纯虚函数）
     virtual NodeTypeInfo get_type_info() const = 0;
+
+    virtual std::vector<std::string> exposed_methods() const {
+        return {"forward"};
+    }
 
     virtual tbb::flow::sender<Value>* get_sender() { return nullptr; }
     virtual tbb::flow::receiver<Value>* get_receiver() { return nullptr; }
 
     const std::vector<Node*>& get_upstreams() const { return upstreams_; }
+
+    std::unique_lock<std::mutex> AcquireExecutionLock() {
+        return std::unique_lock<std::mutex>(execution_mutex_);
+    }
+
+private:
+    std::mutex execution_mutex_;
 };
 
 namespace detail {
@@ -99,6 +115,7 @@ public:
             g.tbb_graph,
             [this](tbb::flow_control& fc) -> Value {
                 // 调用派生类的 forward()
+                auto execution_lock = this->AcquireExecutionLock();
                 auto result = static_cast<Derived*>(this)->forward(&fc);
 
                 // 如果返回 nullptr（针对 Frame 类型），终止流
@@ -122,7 +139,7 @@ public:
     }
 
     void connect() override {
-        // InputNode 没有上游连接
+        // Source node 没有上游连接
     }
 
     void Activate() override {
@@ -162,6 +179,7 @@ public:
                     auto input = val.cast<InputT>();
 
                     // 调用派生类的 forward()
+                    auto execution_lock = this->AcquireExecutionLock();
                     auto result = static_cast<Derived*>(this)->forward(input);
 
                     return Value(std::move(result));
@@ -226,6 +244,7 @@ public:
             tbb::flow::serial,
             [this](const JoinTuple& vals) -> Value {
                 try {
+                    auto execution_lock = this->AcquireExecutionLock();
                     auto result = InvokeWithValues(vals,
                                                    std::index_sequence_for<InputTs...>{});
                     return Value(std::move(result));
@@ -380,105 +399,6 @@ inline size_t GetTupleSize(const TypeInfo& tuple_type) {
     }
     return it->second.size;
 }
-
-// ========== 向后兼容的 InputNode 和 FunctionNode ==========
-// 为了让现有代码继续工作，我们需要实际的类而不是别名
-// 这些类将作为新模板化基类的包装器
-
-class InputNode : public Node {
-public:
-    using OutputType = Frame;
-    std::unique_ptr<tbb::flow::input_node<Value>> tbb_node;
-
-    void build(ExecutionGraph& g) override {
-        tbb_node = std::make_unique<tbb::flow::input_node<Value>>(
-            g.tbb_graph,
-            [this](tbb::flow_control& fc) -> Value {
-                Frame f = this->forward(&fc);
-                if (!f) {
-                    fc.stop();
-                    return Value(nullptr);
-                }
-                return Value(f);
-            }
-        );
-    }
-
-    // 派生类必须实现这个方法
-    virtual Frame forward(tbb::flow_control* fc = nullptr) = 0;
-
-    NodeTypeInfo get_type_info() const override {
-        return NodeTypeInfo{{}, {TypeInfo::create<Frame>()}};
-    }
-
-    void connect() override {}
-
-    void Activate() override {
-        if (tbb_node) {
-            tbb_node->activate();
-        }
-    }
-
-    tbb::flow::sender<Value>* get_sender() override {
-        return tbb_node.get();
-    }
-};
-
-class FunctionNode : public Node {
-public:
-    std::unique_ptr<tbb::flow::function_node<Value, Value>> tbb_node;
-
-    void build(ExecutionGraph& g) override {
-        tbb_node = std::make_unique<tbb::flow::function_node<Value, Value>>(
-            g.tbb_graph,
-            tbb::flow::serial,
-            [this](Value val) -> Value {
-                if (!val.has_value()) return Value(nullptr);
-                try {
-                    Frame f = val.cast<Frame>();
-                    Frame result = this->forward(f);
-                    return result ? Value(result) : Value(nullptr);
-                } catch (...) {
-                    return Value(nullptr);
-                }
-            }
-        );
-    }
-
-    // 派生类必须实现这个方法
-    virtual Frame forward(Frame input) = 0;
-
-    NodeTypeInfo get_type_info() const override {
-        return NodeTypeInfo{
-            {TypeInfo::create<Frame>()},
-            {TypeInfo::create<Frame>()}
-        };
-    }
-
-    void set_input(Node* upstream) override {
-        add_upstream(upstream);
-    }
-
-    void connect() override {
-        for (auto* upstream : upstreams_) {
-            auto* sender = upstream ? upstream->get_sender() : nullptr;
-            auto* receiver = get_receiver();
-            if (sender && receiver) {
-                tbb::flow::make_edge(*sender, *receiver);
-            } else {
-                throw std::runtime_error("Failed to connect: missing sender/receiver");
-            }
-        }
-    }
-
-    tbb::flow::sender<Value>* get_sender() override {
-        return tbb_node.get();
-    }
-
-    tbb::flow::receiver<Value>* get_receiver() override {
-        return tbb_node.get();
-    }
-};
 
 // --- The Executor ---
 class Executor {

@@ -18,28 +18,28 @@ def test_basic_typed_nodes():
     class IntPipeline(ew.Pipeline):
         def __init__(self):
             super().__init__()
-            # 创建 int 类型的计数器和乘法器
-            self.counter = ew.module.IntCounter(start=0, max=5, step=1)
-            self.multiplier = ew.module.IntMultiplier(factor=3)
-            self.printer = ew.module.StringPrinter()
+            self.source = ew.module.NumberSource(start=0, max=5, step=1)
+            self.multiplier = ew.module.MultiplyBy(factor=3)
+            self.text = ew.module.IntToText()
+            self.prefix = ew.module.PrefixText(prefix="[Value] ")
 
         def construct(self):
-            # 连接：int -> int -> string -> void
-            x = self.counter.read()
+            x = self.source.read()
             y = self.multiplier(x)
-            z = self.printer(y)
+            z = self.text(y)
+            self.prefix(z)
 
     try:
         pipeline = IntPipeline()
         print("✓ 成功创建类型化节点")
 
         # 测试类型信息
-        counter_type = pipeline.counter.raw.type_info
-        print(f"  IntCounter output_types: {[t.name for t in counter_type.output_types]}")
+        source_type = pipeline.source.raw.type_info
+        print(f"  NumberSource output_types: {[t.name for t in source_type.output_types]}")
 
         mult_type = pipeline.multiplier.raw.type_info
-        print(f"  IntMultiplier input_types: {[t.name for t in mult_type.input_types]}")
-        print(f"  IntMultiplier output_types: {[t.name for t in mult_type.output_types]}")
+        print(f"  MultiplyBy input_types: {[t.name for t in mult_type.input_types]}")
+        print(f"  MultiplyBy output_types: {[t.name for t in mult_type.output_types]}")
 
         # 验证类型检查
         pipeline.validate()
@@ -62,22 +62,22 @@ def test_type_error_detection():
     """测试类型错误是否能被正确检测"""
     print("\n=== 测试 2：类型错误检测 ===")
 
-    # 注意：当前实现中 StringPrinter 接收 std::string
-    # IntCounter 输出 int
+    # 注意：当前实现中 PrefixText 接收 std::string
+    # NumberSource 输出 int
     # 如果直接连接，在 C++ 端会进行类型转换
     # 这个测试演示类型系统的基本功能
 
     class TypeCheckPipeline(ew.Pipeline):
         def __init__(self):
             super().__init__()
-            self.counter = ew.module.IntCounter(start=0, max=3, step=1)
-            self.printer = ew.module.StringPrinter()
+            self.counter = ew.module.NumberSource(start=0, max=3, step=1)
+            self.prefix = ew.module.PrefixText()
 
         def construct(self):
             x = self.counter.read()  # int
-            # StringPrinter 期望 std::string，但会收到 int
+            # PrefixText 期望 std::string，但会收到 int
             # 在 C++ 端这会导致 Value 转换错误
-            self.printer(x)
+            self.prefix(x)
 
     try:
         pipeline = TypeCheckPipeline()
@@ -104,15 +104,15 @@ def test_node_type_info():
         print(f"✓ 已注册的节点: {nodes}")
 
         # 检查新节点是否注册
-        assert "IntCounter" in nodes
-        assert "IntMultiplier" in nodes
-        assert "StringPrinter" in nodes
+        assert "NumberSource" in nodes
+        assert "MultiplyBy" in nodes
+        assert "PrefixText" in nodes
         print("✓ 新节点都已正确注册")
 
         # 创建节点并查询类型信息
-        counter = ew.module.IntCounter(0, 10, 1)
+        counter = ew.module.NumberSource(0, 10, 1)
         type_info = counter.raw.type_info
-        print(f"  IntCounter 类型信息:")
+        print(f"  NumberSource 类型信息:")
         print(f"    输入类型: {[t.name for t in type_info.input_types]}")
         print(f"    输出类型: {[t.name for t in type_info.output_types]}")
 
@@ -124,49 +124,15 @@ def test_node_type_info():
         return False
 
 
-# ========== 测试 4：Frame 节点兼容性 ==========
-def test_frame_nodes_compatibility():
-    """测试 Frame 节点是否仍然工作"""
-    print("\n=== 测试 4：Frame 节点兼容性 ===")
-
-    class FramePipeline(ew.Pipeline):
-        def __init__(self):
-            super().__init__()
-            self.cam = ew.module.CameraSource(device_id=-1, limit=5)  # Mock 模式，限制帧数防止挂起
-            self.canny = ew.module.CannyFilter()
-            self.sink = ew.module.NullSink()
-
-        def construct(self):
-            frame = self.cam.read()
-            edges = self.canny(frame)
-            self.sink.consume(edges)
-
-    try:
-        pipeline = FramePipeline()
-        pipeline.validate()
-        print("✓ Frame 节点类型检查通过")
-
-        # 运行几帧后停止（Mock 模式会自动停止）
-        pipeline.run()
-        print("✓ Frame Pipeline 运行成功")
-
-        return True
-    except Exception as e:
-        print(f"✗ 测试失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-# ========== 测试 5：Symbol 和连接 ==========
+# ========== 测试 4：Symbol 和连接 ==========
 def test_symbol_connections():
     """测试 Symbol 和节点连接机制"""
-    print("\n=== 测试 5：Symbol 和连接机制 ===")
+    print("\n=== 测试 4：Symbol 和连接机制 ===")
 
     try:
         # 创建节点
-        counter = ew.module.IntCounter(0, 5, 1)
-        multiplier = ew.module.IntMultiplier(2)
+        counter = ew.module.NumberSource(0, 5, 1)
+        multiplier = ew.module.MultiplyBy(2)
 
         # 创建 Symbol
         symbol = ew.Symbol(counter.raw)
@@ -186,10 +152,10 @@ def test_symbol_connections():
         return False
 
 
-# ========== 测试 6：模块动态访问 ==========
+# ========== 测试 5：模块动态访问 ==========
 def test_module_dynamic_access():
     """测试动态模块访问"""
-    print("\n=== 测试 6：模块动态访问 ===")
+    print("\n=== 测试 5：模块动态访问 ===")
 
     try:
         # 测试 __dir__ 方法
@@ -212,24 +178,24 @@ def test_module_dynamic_access():
         return False
 
 
-# ========== 测试 7：Tuple 自动索引与多输入 ==========
+# ========== 测试 6：Tuple 自动索引与多输入 ==========
 def test_tuple_auto_index_and_multi_input():
     """测试 tuple 自动解包与多输入节点连接"""
-    print("\n=== 测试 7：Tuple 自动索引与多输入 ===")
+    print("\n=== 测试 6：Tuple 自动索引与多输入 ===")
 
     class TuplePipeline(ew.Pipeline):
         def __init__(self):
             super().__init__()
-            self.emitter = ew.module.TupleEmitter(start=1, max=3, step=1)
-            self.multiplier = ew.module.IntMultiplier(factor=2)
-            self.joiner = ew.module.IntStringJoiner()
-            self.printer = ew.module.StringPrinter()
+            self.emitter = ew.module.PairEmitter(start=1, max=3)
+            self.multiplier = ew.module.MultiplyBy(factor=2)
+            self.joiner = ew.module.PairJoiner()
+            self.prefix = ew.module.PrefixText()
 
         def construct(self):
             number, text = self.emitter.read()
             doubled = self.multiplier(number)
             joined = self.joiner(doubled, text)
-            self.printer(joined)
+            self.prefix(joined)
 
     try:
         pipeline = TuplePipeline()
@@ -244,10 +210,10 @@ def test_tuple_auto_index_and_multi_input():
         return False
 
 
-# ========== 测试 8：Small Buffer 析构安全 ==========
+# ========== 测试 7：Small Buffer 析构安全 ==========
 def test_small_buffer_safety():
     """测试 SBO 析构是否正确释放小类型"""
-    print("\n=== 测试 8：Small Buffer 析构安全 ===")
+    print("\n=== 测试 7：Small Buffer 析构安全 ===")
 
     class SmallTrackedPipeline(ew.Pipeline):
         def __init__(self):
@@ -289,7 +255,6 @@ def main():
     results.append(("基本类型化节点", test_basic_typed_nodes()))
     results.append(("类型错误检测", test_type_error_detection()))
     results.append(("节点类型信息查询", test_node_type_info()))
-    results.append(("Frame 节点兼容性", test_frame_nodes_compatibility()))
     results.append(("Symbol 和连接", test_symbol_connections()))
     results.append(("模块动态访问", test_module_dynamic_access()))
     results.append(("Tuple 自动索引与多输入", test_tuple_auto_index_and_multi_input()))
