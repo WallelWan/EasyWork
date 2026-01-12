@@ -35,7 +35,7 @@
 #define EW_FOR_EACH_10(MACRO, x, ...) MACRO(x) EW_FOR_EACH_9(MACRO, __VA_ARGS__)
 
 // Helpers for specific tasks
-#define EW_STRINGIFY_METHOD(x) , #x
+#define EW_STRINGIFY_METHOD(x) #x,
 // Use { hash("name"), &Self::name } format. 
 #define EW_PAIR_METHOD_ENTRY(x) { easywork::hash_string(#x), &Self::x },
 
@@ -54,11 +54,48 @@
  */
 #define EW_EXPORT_METHODS(...) \
     std::vector<std::string> exposed_methods() const override { \
-        return { "forward" EW_FOR_EACH(EW_STRINGIFY_METHOD, __VA_ARGS__) }; \
+        return { "forward", EW_FOR_EACH(EW_STRINGIFY_METHOD, __VA_ARGS__) }; \
     } \
     \
     static std::unordered_map<size_t, MethodSignature> method_table() { \
         return { \
             EW_FOR_EACH(EW_PAIR_METHOD_ENTRY, __VA_ARGS__) \
         }; \
+    }
+
+// =========================================================================
+// New Heterogeneous Registration (Phase 2+)
+// =========================================================================
+
+#define EW_METHOD_META_ENTRY(x) \
+    { \
+        easywork::hash_string(#x), \
+        easywork::MethodMeta{ \
+            easywork::CreateInvoker(&Self::x), \
+            easywork::GetArgTypes(&Self::x), \
+            easywork::GetReturnType(&Self::x) \
+        } \
+    },
+
+/**
+ * @brief Registers methods with automatic type reflection and invoker generation.
+ *        Used for the new heterogeneous BaseNode system.
+ * 
+ * Usage:
+ *   class MyNode : public BaseNode<MyNode> {
+ *       int process(int x) { ... }
+ *       void config(float v) { ... }
+ *       EW_ENABLE_METHODS(process, config)
+ *   };
+ */
+#define EW_ENABLE_METHODS(...) \
+    static const std::unordered_map<size_t, easywork::MethodMeta>& method_registry() { \
+        static const std::unordered_map<size_t, easywork::MethodMeta> registry = { \
+            EW_FOR_EACH(EW_METHOD_META_ENTRY, __VA_ARGS__) \
+        }; \
+        return registry; \
+    } \
+    \
+    std::vector<std::string> exposed_methods() const override { \
+        return { EW_FOR_EACH(EW_STRINGIFY_METHOD, __VA_ARGS__) }; \
     }

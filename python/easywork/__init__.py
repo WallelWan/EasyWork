@@ -2,332 +2,408 @@ from . import easywork_core as _core
 
 _ACTIVE_PIPELINE = None
 
+def hash_string(s):
+    # Simple hash to match C++ (fnv1a) or use _core.hash_string if exposed?
+    # bindings.cpp didn't expose hash_string directly, but exposed ID_FORWARD which is hashed.
+    # Actually, NodeWrapper needs to hash method names to look up in type_info.
+    # We can compute it or rely on looking up by name if type_info keys were names?
+    # type_info.methods keys are size_t (hashes).
+    # So we NEED the hash function.
+    # Helper: _core.hash_string is NOT exposed in bindings.cpp shown earlier.
+    # But wait, bindings.cpp:
+    # m.attr("ID_FORWARD") = easywork::ID_FORWARD;
+    # It does NOT expose hash_string.
+    # I should have exposed it.
+    
+    # Workaround: Iterate type_info.methods (which are hashes) 
+    # But how do we know which hash corresponds to "set_string"?
+    # We don't.
+    # This is a problem.
+    # However, exposed_methods() returns names.
+    # We can build a local map {name: hash} if we can't compute hash.
+    # BUT we can't compute hash without the function.
+    # Wait, easywork::hash_string is constexpr. 
+    # I can implement FNV-1a in Python.
+    
+    hash_val = 14695981039346656037
+    for char in s:
+        hash_val ^= ord(char)
+        hash_val *= 1099511628211
+        hash_val &= 0xFFFFFFFFFFFFFFFF # Force 64-bit
+    return hash_val
+
 # ========== Symbol ==========
 class Symbol:
     """Represents a data flow connection between nodes."""
-    def __init__(self, producer_node, tuple_index=None):
+    def __init__(self, producer_node, source_method_id=None, tuple_index=None):
         self.producer_node = producer_node
-        self.tuple_index = tuple_index  # None 或索引值（0, 1, 2...）
+        # Default to forward if not specified
+        self.source_method_id = source_method_id if source_method_id is not None else _core.ID_FORWARD
+        self.tuple_index = tuple_index
 
     def __iter__(self):
-        """支持 tuple 解包：a, b = symbol"""
-        # 获取上游节点的输出类型
+        """Support tuple unpacking: a, b = symbol"""
         type_info = self.producer_node.type_info
 
-        if not type_info.output_types:
-            raise ValueError("Cannot unpack: node has no output")
+        if self.source_method_id not in type_info.methods:
+             raise ValueError(f"Unknown source method ID {self.source_method_id}")
 
-        output_type = type_info.output_types[0]
+        output_type = type_info.methods[self.source_method_id].output_type
 
-        # 检查是否是 tuple 类型
+        # Check tuple
         if not self._is_tuple_type(output_type):
             if "tuple" in output_type.name.lower() or "St4tuple" in output_type.name:
-                raise ValueError(f"Tuple type not registered: {output_type.name}")
+                 raise ValueError(f"Tuple type not registered: {output_type.name}")
             raise ValueError(f"Cannot unpack non-tuple type: {output_type.name}")
 
-        # 获取 tuple 元素数量
         num_elements = self._get_tuple_size(output_type)
         if num_elements <= 0:
             raise ValueError(f"Tuple type not registered: {output_type.name}")
 
-        # 为每个元素创建 Symbol
         symbols = []
         for i in range(num_elements):
-            # 创建自动索引的 Symbol
-            symbol = Symbol(self.producer_node, tuple_index=i)
+            # Create symbol sharing the same source method, but with tuple index
+            symbol = Symbol(self.producer_node, self.source_method_id, tuple_index=i)
             symbols.append(symbol)
 
         return iter(symbols)
 
     def _is_tuple_type(self, type_info):
-        """检查类型是否是 tuple。"""
         return _core.get_tuple_size(type_info) > 0
 
     def _get_tuple_size(self, type_info):
-        """获取 tuple 的元素数量。"""
         return _core.get_tuple_size(type_info)
 
-# ========== Base Node Wrapper ==========
+# ========== Node Wrapper ==========
 class NodeWrapper:
-    """Base class for all Python node wrappers."""
-    def __init__(self, cpp_node):
-        self._cpp_node = cpp_node
+    def __init__(self, raw_node, pipeline=None):
+        self.raw = raw_node
+        self.pipeline = pipeline
         self.built = False
+        
+        # Build method name to ID map
+        self._method_name_to_id = {}
+        self._id_to_method_name = {}
+        # We can't easily map names to IDs without the hash function or the list.
+        # exposed_methods gives us names.
+        # We can try hashing them to see if they match keys in type_info.methods.
+        for name in self.raw.exposed_methods:
+             h = hash_string(name)
+             self._method_name_to_id[name] = h
+             self._id_to_method_name[h] = name
+        
+        # Ensure ID_FORWARD is always mapped
+        if _core.ID_FORWARD not in self._id_to_method_name:
+             self._id_to_method_name[_core.ID_FORWARD] = "forward"
 
     @property
-    def raw(self):
-        """Access the underlying C++ node."""
-        return self._cpp_node
+    def type_name(self):
+        # Try to get type name from raw node if we add it to C++
+        # For now, use the task name if available or fallback
+        try:
+            return self.raw.type_name
+        except AttributeError:
+            return "Node"
+
+    def __str__(self):
+        return f"{self.type_name}"
+
+    @property
+    def type_info(self):
+        return self.raw.type_info
+
+    @property
+    def is_open(self):
+        return self.raw.is_open()
+
+    def open(self, *args, **kwargs):
+        return self.raw.open(*args, **kwargs)
+
+    def close(self, *args, **kwargs):
+        return self.raw.close(*args, **kwargs)
 
     def read(self):
-        """Source node: create output symbol."""
-        return Symbol(self._cpp_node)
+        # Legacy support for Source nodes
+        return self.__call__()
 
-    def write(self, input_symbol):
-        """Sink node: connect input to this node."""
-        symbol = _resolve_symbol(input_symbol)
-        self._cpp_node.set_input(symbol.producer_node)
+    def __getattr__(self, name):
+        # Check if it is a method
+        if name in self._method_name_to_id:
+            method_id = self._method_name_to_id[name]
+            return self._create_method_proxy(name, method_id)
+        
+        # Fallback to raw (but raw is C++ object, attributes might not work directly as expected)
+        # But bindings expose some.
+        return getattr(self.raw, name)
 
-    def consume(self, input_symbol):
-        """Sink node: connect input to this node."""
-        symbol = _resolve_symbol(input_symbol)
-        self._cpp_node.set_input(symbol.producer_node)
-
-    def _call_method(self, method_name, *args, **kwargs):
-        """Call a named method on the node."""
-        if not args:
-            raise ValueError("Node requires at least one input")
-
-        if kwargs:
-            raise NotImplementedError("Keyword inputs are not supported")
-
-        if len(args) == 1:
-            symbol = _resolve_symbol(args[0])
-            self._cpp_node.set_input_for(method_name, symbol.producer_node)
-            return Symbol(self._cpp_node)
-
-        if len(args) > 1:
-            for symbol in args:
-                resolved = _resolve_symbol(symbol)
-                self._cpp_node.set_input_for(method_name, resolved.producer_node)
-            return Symbol(self._cpp_node)
-
-        raise NotImplementedError("This node is not callable")
+    def _create_method_proxy(self, name, method_id):
+        def proxy(*args, **kwargs):
+            return self._connect(name, method_id, *args, **kwargs)
+        return proxy
 
     def __call__(self, *args, **kwargs):
-        """Enable calling the node directly (like module(x))."""
-        return self._call_method("forward", *args, **kwargs)
+        # Default connection to 'forward'
+        return self._connect("forward", _core.ID_FORWARD, *args, **kwargs)
 
-    def __getattr__(self, name):
-        exposed_methods = self._cpp_node.exposed_methods
-        if name in exposed_methods:
-            def _method(*args, **kwargs):
-                return self._call_method(name, *args, **kwargs)
-            return _method
-        raise AttributeError(f"'{self.__class__.__name__}' has no attribute '{name}'")
+    def _connect(self, method_name, method_id, *args, **kwargs):
+        # Eager Mode: If no active pipeline, execute immediately
+        if _ACTIVE_PIPELINE is None:
+             return self.raw.invoke(method_name, *args)
 
-    def __dir__(self):
-        return sorted(set(super().__dir__()) | set(self._cpp_node.exposed_methods))
+        # Tracing Mode
+        if self not in _ACTIVE_PIPELINE._nodes:
+            _ACTIVE_PIPELINE._nodes.append(self)
+        
+        # Process inputs
+        for idx, arg in enumerate(args):
+            upstream_node = None
+            upstream_method_id = _core.ID_FORWARD
+            
+            if isinstance(arg, Symbol):
+                upstream_node = arg.producer_node
+                upstream_method_id = arg.source_method_id
+                
+                if arg.tuple_index is not None:
+                     # Handle Tuple extraction
+                     # Create a temporary TupleGetNode
+                     # This is complex to do on the fly without a factory exposed nicely.
+                     # But core.create_tuple_get_node exists.
+                     
+                     # Get output type of upstream
+                     up_type = upstream_node.type_info.methods[upstream_method_id].output_type
+                     
+                     tuple_node_ptr = _core.create_tuple_get_node(up_type, arg.tuple_index)
+                     if _ACTIVE_PIPELINE:
+                         tuple_wrapper = _ACTIVE_PIPELINE._register_internal_node(tuple_node_ptr)
+                         
+                         # Connect Upstream -> TupleGet
+                         # TupleGetNode has 'forward' (ID_FORWARD) input
+                         tuple_wrapper.raw.set_input_for("forward", upstream_node)
+                         
+                         # Track connection for TupleGet
+                         # Upstream (method_id) -> TupleGet (forward)
+                         _ACTIVE_PIPELINE._record_connection(
+                             tuple_wrapper.raw, _core.ID_FORWARD, 0,
+                             upstream_node, upstream_method_id
+                         )
+                         
+                         upstream_node = tuple_wrapper.raw
+                         upstream_method_id = _core.ID_FORWARD
+                     else:
+                         raise RuntimeError("Tuple unpacking requires active pipeline context")
 
-def _get_active_pipeline():
-    if _ACTIVE_PIPELINE is None:
-        raise RuntimeError("Tuple indexing requires an active Pipeline context")
-    return _ACTIVE_PIPELINE
+            elif isinstance(arg, NodeWrapper):
+                # Ensure upstream node is registered in the pipeline
+                if _ACTIVE_PIPELINE and arg not in _ACTIVE_PIPELINE._nodes:
+                    _ACTIVE_PIPELINE._nodes.append(arg)
+                
+                upstream_node = arg.raw
+                upstream_method_id = _core.ID_FORWARD # Assume forward default
+            
+            # TODO: Handle literals (ConstantNode) 
+            
+            if upstream_node:
+                self.raw.set_input_for(method_name, upstream_node)
+                if _ACTIVE_PIPELINE:
+                    _ACTIVE_PIPELINE._record_connection(
+                        self.raw, method_id, idx,
+                        upstream_node, upstream_method_id
+                    )
+
+        # Return output symbol
+        return Symbol(self.raw, source_method_id=method_id)
 
 
-def _register_internal_node(cpp_node):
-    pipeline = _get_active_pipeline()
-    return pipeline._register_internal_node(cpp_node)
-
-
-def _resolve_symbol(symbol):
-    if not isinstance(symbol, Symbol):
-        raise TypeError("Input must be a Symbol")
-    if symbol.tuple_index is None:
-        return symbol
-    type_info = symbol.producer_node.type_info
-    if not type_info.output_types:
-        raise ValueError("Tuple producer has no outputs")
-    tuple_get_node = _core.create_tuple_get_node(type_info.output_types[0],
-                                                 symbol.tuple_index)
-    wrapper = _register_internal_node(tuple_get_node)
-    wrapper.raw.set_input(symbol.producer_node)
-    return Symbol(wrapper.raw)
-
-# ========== Dynamic Module (C++20 Factory Pattern) ==========
-class _DynamicModule:
-    """Dynamic access to C++ registered nodes using factory pattern.
-
-    Allows accessing nodes as: ew.module.NumberSource(), ew.module.MultiplyBy(), etc.
-    """
-
-    def __init__(self):
-        self._cache = {}
-        self._registry = _core._NodeRegistry.instance()
-
-    def __getattr__(self, name):
-        """Lazily create and cache Python wrapper classes for C++ nodes."""
-        if name not in self._cache:
-            if not self._registry.is_registered(name):
-                available = self._registry.registered_nodes()
-                raise AttributeError(
-                    f"'{self.__class__.__name__}' has no attribute '{name}'. "
-                    f"Available nodes: {available}"
-                )
-
-            # Create dynamic wrapper class on first access
-            def __init__(self, *args, **kwargs):
-                self._cpp_node = _core.create_node(name, *args, **kwargs)
-                self.built = False
-
-            cls = type(name, (NodeWrapper,), {
-                '__init__': __init__,
-                '__module__': 'easywork.module',
-                '__doc__': f'Dynamically generated wrapper for {name} (C++20 factory pattern)',
-            })
-            self._cache[name] = cls
-
-        return self._cache[name]
-
-    def __dir__(self):
-        """Return list of all registered node names for autocompletion."""
-        return list(self._registry.registered_nodes())
-
-# Create ew.module access point
-module = _DynamicModule()
-
-# ========== Pipeline (PyTorch-style) ==========
+# ========== Pipeline ==========
 class Pipeline:
-    """PyTorch-style pipeline for defining computation graphs.
-
-    Automatically registers NodeWrapper instances assigned as attributes.
-    """
-
     def __init__(self):
         self._graph = _core.ExecutionGraph()
         self._executor = _core.Executor()
         self._nodes = []
         self._internal_nodes = []
-        self._has_run = False
         self._validated = False
-
+        self._has_run = False
+        # Metadata: {(node_ptr, method_id, input_idx): (upstream_node_ptr, upstream_method_id)}
+        self._connection_metadata = {}
+    
     def __setattr__(self, name, value):
-        """Magic: Automatically register NodeWrapper instances assigned to self."""
-        # Standard assignment first
-        object.__setattr__(self, name, value)
-
-        # Registration logic
+        # Auto-register NodeWrappers assigned to the pipeline (Torch-like style)
         if isinstance(value, NodeWrapper):
-            if not hasattr(self, '_nodes'):
-                self._nodes = []
-            if value not in self._nodes:
+            if hasattr(self, "_nodes") and value not in self._nodes:
                 self._nodes.append(value)
+        super().__setattr__(name, value)
+    
+    def __enter__(self):
+        global _ACTIVE_PIPELINE
+        self._previous_pipeline = _ACTIVE_PIPELINE
+        _ACTIVE_PIPELINE = self
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        global _ACTIVE_PIPELINE
+        _ACTIVE_PIPELINE = self._previous_pipeline
+
+    def _record_connection(self, consumer, consumer_method, input_idx, producer, producer_method):
+        # Use python id() or raw pointer address if available?
+        # raw is shared_ptr, so it's unique per node instance.
+        # We can use the object itself as key if it's hashable, or id().
+        key = (consumer, consumer_method, input_idx)
+        val = (producer, producer_method)
+        self._connection_metadata[key] = val
 
     def construct(self):
-        """User should override this to define connections (topology)."""
-        raise NotImplementedError("You must implement construct() method")
+        pass
 
-    def validate(self):
-        """在运行前进行类型检查。
-
-        Returns:
-            True if validation passes
-
-        Raises:
-            TypeError: If type mismatches are found
-        """
-        if self._validated:
-            return True
-
-        print("[EasyWork] Validating types...")
-
-        # 1. 执行 construct 定义拓扑
-        self._clear_internal_nodes()
+    def _clear_topology(self):
+        """Clears all topology information to allow reconstruction."""
+        # 1. Reset C++ connections for existing nodes
+        # (Needed for Torch-like style where nodes persist)
         self._reset_connections()
+        
+        # 2. Clear Python node list
+        # (Needed for Construct-style where new nodes are created)
+        self._nodes.clear()
+        
+        # 3. Clear internals
+        self._clear_internal_nodes()
+        self._connection_metadata.clear()
+
+    def _build_topology(self):
+        """Reconstructs the topology by clearing and running user code."""
+        # Heuristic: If nodes exist and construct is default, assume 'with pipeline:' usage
+        # and do NOT clear topology.
+        is_default_construct = self.construct.__func__ is Pipeline.construct
+        if self._nodes and is_default_construct:
+            print("[EasyWork] Detected external graph construction, preserving nodes...")
+            return
+
+        self._clear_topology()
         self._with_active_pipeline(self.construct)
 
-        # 2. 构建节点（类型信息在 build 后可用）
-        for node in self._nodes:
-            if not node.built:
-                node.raw.build(self._graph)
-                node.built = True
+    def validate(self):
+        print("[EasyWork] Validating types...")
+        self._build_topology()
 
-        # 3. 执行类型检查
         errors = []
+        wrapper_by_raw = {node.raw: node for node in self._nodes}
         for node in self._nodes:
             cpp_node = node.raw
-
-            # 获取节点类型信息
-            try:
-                type_info = cpp_node.type_info
-            except Exception as e:
-                errors.append(f"Cannot get type info for node: {e}")
-                continue
-
-            upstreams = list(cpp_node.upstreams)
-
-            if not type_info.input_types:
-                if upstreams:
-                    errors.append(
-                        f"Type mismatch: source node has unexpected inputs "
-                        f"(got {len(upstreams)})")
-                continue
-
-            # Support Fan-In: If node expects 1 input but gets multiple, check all against the single input type
-            is_fan_in = False
-            if len(upstreams) != len(type_info.input_types):
-                if len(type_info.input_types) == 1 and len(upstreams) > 1:
-                    is_fan_in = True
+            type_info = cpp_node.type_info
+            
+            # Reconstruct mapping:
+            method_arg_counters = {} # method_id -> current_arg_idx
+            
+            # Iterate C++ connections to sync with metadata
+            for i, conn in enumerate(cpp_node.connections):
+                if not conn.node: continue
+                
+                mid = conn.method_id
+                arg_idx = method_arg_counters.get(mid, 0)
+                method_arg_counters[mid] = arg_idx + 1
+                
+                # Retrieve metadata
+                meta_key = (cpp_node, mid, arg_idx)
+                
+                upstream_method_id = _core.ID_FORWARD
+                if meta_key in self._connection_metadata:
+                    _, upstream_method_id = self._connection_metadata[meta_key]
                 else:
-                    errors.append(
-                        f"Type mismatch: node expects {len(type_info.input_types)} inputs "
-                        f"but got {len(upstreams)}")
-                    continue
-
-            for idx, upstream in enumerate(upstreams):
-                upstream_type = upstream.type_info
-                if not upstream_type.output_types:
-                    errors.append(
-                        f"Type mismatch: upstream node has no outputs at input {idx}")
-                    continue
-                if len(upstream_type.output_types) != 1:
-                    errors.append(
-                        f"Type mismatch: upstream node has multiple outputs at input {idx}")
+                    # Fallback or error?
+                    pass
+                
+                # Check types
+                method_name = node._id_to_method_name.get(mid, str(mid))
+                if mid not in type_info.methods:
+                    errors.append(f"Node {node} inputs to unknown method {method_name}")
                     continue
                 
-                expected_type = type_info.input_types[0] if is_fan_in else type_info.input_types[idx]
+                input_types = type_info.methods[mid].input_types
+                if arg_idx >= len(input_types):
+                     errors.append(f"Too many inputs for method {method_name}")
+                     continue
                 
-                if upstream_type.output_types[0] != expected_type:
+                expected_type = input_types[arg_idx]
+                
+                # Upstream output type
+                up_node = conn.node
+                up_type_info = up_node.type_info
+                up_wrapper = wrapper_by_raw.get(up_node)
+                upstream_method_name = str(upstream_method_id)
+                if up_wrapper:
+                    upstream_method_name = up_wrapper._id_to_method_name.get(
+                        upstream_method_id,
+                        upstream_method_name,
+                    )
+                
+                if upstream_method_id not in up_type_info.methods:
+                     errors.append(f"Upstream method {upstream_method_name} not found")
+                     continue
+                
+                actual_type = up_type_info.methods[upstream_method_id].output_type
+                
+                if expected_type != actual_type:
                     errors.append(
-                        f"Type mismatch: expected {expected_type.name} "
-                        f"but got {upstream_type.output_types[0].name} at input {idx}")
+                        f"Type mismatch: Node {node} Method {method_name} Arg {arg_idx} "
+                        f"expects {expected_type.name}, got {actual_type.name} "
+                        f"(from {up_node} method {upstream_method_name})")
 
         if errors:
-            error_msg = "\n".join(errors)
-            print(f"[EasyWork] Type Errors Found:\n{error_msg}")
-            raise TypeError(f"Type validation failed:\n{error_msg}")
+            raise TypeError("\n".join(errors))
 
-        print("[EasyWork] Type Check Passed ✓")
         self._validated = True
         return True
 
+    def open(self):
+        for node in self._nodes:
+            node.open()
+
+    def close(self):
+        for node in self._nodes:
+            node.close()
+
+    def _ensure_all_open(self):
+        internal_nodes = set(getattr(self, "_internal_nodes", []))
+        not_open = [node for node in self._nodes
+                    if node not in internal_nodes and not node.is_open]
+        if not_open:
+            names = ", ".join(str(n) for n in not_open)
+            raise RuntimeError(f"All nodes must be opened before run(). Closed nodes: {names}")
+
     def run(self):
-        """Execute the pipeline: trace → build → connect → execute."""
+        # If not validated/constructed recently, build topology now.
         if not self._validated:
-            self.validate()
+            self._build_topology()
 
-        print("[EasyWork] Tracing topology...")
         if self._has_run:
+            print("[EasyWork] Resetting Graph for re-run...")
             self._graph.reset()
+            for node in self._nodes:
+                node.built = False
 
-        # 1. Trace: Execute user's connection logic
-        self._clear_internal_nodes()
-        self._reset_connections()
-        self._with_active_pipeline(self.construct)
-
-        # 2. Build: Create all C++ Taskflow nodes
         print(f"[EasyWork] Materializing Graph ({len(self._nodes)} nodes)...")
         for node in self._nodes:
             if not node.built:
                 node.raw.build(self._graph)
                 node.built = True
 
-        # 3. Connect: Link Taskflow edges
         print("[EasyWork] Connecting Edges...")
         for node in self._nodes:
             node.raw.connect()
 
-        # 3.5. Activate sources after edges are wired
         for node in self._nodes:
             node.raw.activate()
 
-        # 4. Execute
+        self._ensure_all_open()
         print("[EasyWork] Starting Executor...")
         try:
             self._executor.run(self._graph)
         except KeyboardInterrupt:
             print("\n[EasyWork] Stopping...")
         self._has_run = True
+        
+        # Invalidate after run to force rebuild next time unless re-validated.
+        # This supports dynamic changes in 'construct' between runs.
+        self._validated = False
 
     def _with_active_pipeline(self, fn):
         global _ACTIVE_PIPELINE
@@ -358,3 +434,22 @@ class Pipeline:
     def _reset_connections(self):
         for node in self._nodes:
             node.raw.clear_upstreams()
+
+# Module proxy
+
+class ModuleProxy:
+    def __getattr__(self, name):
+        if _core._NodeRegistry.instance().is_registered(name):
+            # Return a factory function
+            def factory(*args, **kwargs):
+                node = _core.create_node(name, *args, **kwargs)
+                return NodeWrapper(node)
+            return factory
+        raise AttributeError(f"Node type '{name}' not found")
+
+    def __dir__(self):
+        return _core._NodeRegistry.instance().registered_nodes()
+
+
+
+module = ModuleProxy()

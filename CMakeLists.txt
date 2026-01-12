@@ -31,6 +31,11 @@ message(STATUS "OpenCV Version: ${OpenCV_VERSION}")
 
 # Taskflow (Header-Only)
 message(STATUS "Using Taskflow from extern/taskflow")
+if(NOT TARGET Taskflow::Taskflow)
+    add_library(Taskflow INTERFACE)
+    target_include_directories(Taskflow INTERFACE extern) # extern/taskflow/taskflow.hpp -> #include <taskflow/taskflow.hpp>
+    add_library(Taskflow::Taskflow ALIAS Taskflow)
+endif()
 
 # Threads (pthread)
 find_package(Threads REQUIRED)
@@ -66,6 +71,19 @@ endif()
 
 find_package(pybind11 QUIET)
 
+if(Python3_EXECUTABLE)
+    get_filename_component(PYTHON3_BIN_DIR "${Python3_EXECUTABLE}" DIRECTORY)
+    get_filename_component(PYTHON3_PREFIX "${PYTHON3_BIN_DIR}" DIRECTORY)
+    set(PYTHON3_LIBDIR "${PYTHON3_PREFIX}/lib")
+    if(EXISTS "${PYTHON3_LIBDIR}")
+        list(APPEND CMAKE_BUILD_RPATH "${PYTHON3_LIBDIR}")
+        list(APPEND CMAKE_INSTALL_RPATH "${PYTHON3_LIBDIR}")
+        set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+        link_directories("${PYTHON3_LIBDIR}")
+        message(STATUS "Python3 libdir: ${PYTHON3_LIBDIR}")
+    endif()
+endif()
+
 if(NOT pybind11_FOUND)
     # Fallback to FetchContent only if system pybind11 is not available
     message(STATUS "pybind11 not found, will download...")
@@ -83,6 +101,7 @@ endif()
 # Include Directories
 include_directories(
     src
+    extern
     extern/taskflow
     ${OpenCV_INCLUDE_DIRS}
 )
@@ -93,18 +112,35 @@ file(GLOB_RECURSE SOURCES
     "src/bindings/*.cpp"
 )
 
-# --- 3. Extension Module ---
+# Runtime Library
+add_library(easywork_runtime STATIC
+    src/runtime/type_system.cpp
+    # Add other runtime source files if they exist (currently core.h etc are header-only or templated)
+)
+target_include_directories(easywork_runtime PUBLIC src)
 
-pybind11_add_module(easywork_core ${SOURCES})
-
-# Link Libraries
-target_link_libraries(easywork_core PRIVATE
-    ${OpenCV_LIBS}
+# Main Extension Module
+pybind11_add_module(easywork_core src/bindings/bindings.cpp)
+target_link_libraries(easywork_core PRIVATE 
+    easywork_runtime
+    Taskflow::Taskflow 
+    ${OpenCV_LIBS} 
     spdlog::spdlog
-    Threads::Threads
 )
 
 # Output directory
 set_target_properties(easywork_core PROPERTIES 
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python/easywork
 )
+
+# --- 4. C++ Unit Tests ---
+enable_testing()
+
+add_executable(test_invoker src/runtime/test_invoker.cpp)
+target_link_libraries(test_invoker PRIVATE
+    easywork_runtime
+    ${OpenCV_LIBS}
+    spdlog::spdlog
+    Threads::Threads
+)
+add_test(NAME test_invoker COMMAND test_invoker)
