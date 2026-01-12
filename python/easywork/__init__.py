@@ -1,6 +1,7 @@
 from . import easywork_core as _core
 
 _ACTIVE_PIPELINE = None
+_SYMBOLIC_MODE = 0
 
 # ========== Symbol ==========
 class Symbol:
@@ -134,6 +135,29 @@ def _resolve_symbol(symbol):
     wrapper.raw.set_input(symbol.producer_node)
     return Symbol(wrapper.raw)
 
+
+def _is_symbolic_mode():
+    return _SYMBOLIC_MODE > 0 or _ACTIVE_PIPELINE is not None
+
+
+class _SymbolicScope:
+    def __enter__(self):
+        global _SYMBOLIC_MODE
+        _SYMBOLIC_MODE += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        global _SYMBOLIC_MODE
+        _SYMBOLIC_MODE -= 1
+
+
+def symbolic_context(fn):
+    """Decorator to run a function with symbolic ew.module behavior."""
+    def _wrapped(*args, **kwargs):
+        with _SymbolicScope():
+            return fn(*args, **kwargs)
+    return _wrapped
+
 # ========== Dynamic Module (C++20 Factory Pattern) ==========
 class _DynamicModule:
     """Dynamic access to C++ registered nodes using factory pattern.
@@ -143,6 +167,7 @@ class _DynamicModule:
 
     def __init__(self):
         self._cache = {}
+        self._factory_cache = {}
         self._registry = _core._NodeRegistry.instance()
 
     def __getattr__(self, name):
@@ -167,7 +192,18 @@ class _DynamicModule:
             })
             self._cache[name] = cls
 
-        return self._cache[name]
+        if _is_symbolic_mode():
+            return self._cache[name]
+
+        if name not in self._factory_cache:
+            def _factory(*args, **kwargs):
+                return _core.create_node(name, *args, **kwargs)
+            _factory.__name__ = name
+            _factory.__qualname__ = name
+            _factory.__doc__ = f'Create a {name} node instance.'
+            self._factory_cache[name] = _factory
+
+        return self._factory_cache[name]
 
     def __dir__(self):
         """Return list of all registered node names for autocompletion."""
@@ -334,7 +370,8 @@ class Pipeline:
         previous = _ACTIVE_PIPELINE
         _ACTIVE_PIPELINE = self
         try:
-            return fn()
+            with _SymbolicScope():
+                return fn()
         finally:
             _ACTIVE_PIPELINE = previous
 
