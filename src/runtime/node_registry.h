@@ -40,6 +40,12 @@ struct StringLiteral {
 using NodeCreator = std::function<std::shared_ptr<Node>(
     pybind11::args, pybind11::kwargs)>;
 
+/**
+ * @brief Singleton registry for creating nodes by name.
+ * 
+ * Stores factory functions (Creators) for all registered node types.
+ * Supports creating nodes with pybind11 arguments/keyword arguments.
+ */
 class NodeRegistry {
 public:
     static NodeRegistry& instance() {
@@ -123,6 +129,9 @@ namespace detail {
 
 // ========== Argument Descriptor ==========
 
+/**
+ * @brief Describes a named argument with a default value for node registration.
+ */
 template<typename T>
 struct Arg {
     const char* name;
@@ -172,7 +181,16 @@ public:
 
 // ========== Registration Macro ==========
 
-// Unified macro: EW_REGISTER_NODE(Class, "Name", Arg(...), ...)
+/**
+ * @brief Registers a node class with the system.
+ * 
+ * @param Classname The C++ class name of the node.
+ * @param PyName The string name exposed to Python.
+ * @param ... Optional Arg("name", default_val) descriptors.
+ * 
+ * Example:
+ *   EW_REGISTER_NODE(MyNode, "MyNode", Arg("factor", 1.0))
+ */
 #define EW_REGISTER_NODE(Classname, PyName, ...) \
     inline easywork::NodeRegistrar<PyName, Classname> \
         registrar_##Classname##_{__VA_ARGS__};

@@ -16,6 +16,12 @@ enum class DeviceType {
 
 // The payload carrying the actual data.
 // In Phase 2, we wrap cv::Mat for convenience, but design it to be replaced easily.
+/**
+ * @brief Represents an image/data frame buffer.
+ * 
+ * Currently backed by OpenCV cv::Mat for easy memory management and processing.
+ * Supports passing data pointers to Python (NumPy) via buffer protocol.
+ */
 struct FrameBuffer {
     FrameBuffer(int w, int h, int type) {
         // Allocate CPU memory using OpenCV (aligned malloc)
@@ -49,7 +55,7 @@ struct FrameBuffer {
 // Use shared_ptr to allow multiple consumers (fork graph).
 using Frame = std::shared_ptr<FrameBuffer>;
 
-// Simple factory
+/// Helper to create a new FrameBuffer.
 inline Frame make_frame(int w, int h, int type = CV_8UC3) {
     return std::make_shared<FrameBuffer>(w, h, type);
 }
