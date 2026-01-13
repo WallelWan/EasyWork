@@ -10,7 +10,7 @@
 #include <tuple>
 #include <utility>
 #include <pybind11/pybind11.h>
-#include "core.h"
+#include "runtime/core/core.h"
 
 namespace easywork {
 
@@ -121,6 +121,8 @@ namespace detail {
     // Entry point: Takes variadic Args, packs them into a tuple, and delegates
     template<typename NodeT, typename... Args>
     std::shared_ptr<Node> CreateNodeWithArgs(pybind11::args args, pybind11::kwargs kwargs, Args... arg_defs) {
+        TypeUsageRegistrar<std::decay_t<Args>...>::Do();
+        (RegisterPythonType<std::decay_t<Args>>(), ...);
         return CreateNodeWithArgsImpl<NodeT>(
             args, kwargs, std::make_index_sequence<sizeof...(Args)>{}, std::make_tuple(arg_defs...)
         );

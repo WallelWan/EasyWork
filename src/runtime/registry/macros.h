@@ -4,6 +4,13 @@
 #include <string>
 #include <unordered_map>
 
+namespace easywork {
+
+template<typename Derived, typename Ret, typename... Args>
+void RegisterMethodTypes(Ret (Derived::*)(Args...));
+
+} // namespace easywork
+
 // =========================================================================
 // Preprocessor Metaprogramming Helpers (Variadic Map)
 // =========================================================================
@@ -70,11 +77,14 @@
 #define EW_METHOD_META_ENTRY(x) \
     { \
         easywork::hash_string(#x), \
-        easywork::MethodMeta{ \
-            easywork::CreateInvoker(&Self::x), \
-            easywork::GetArgTypes(&Self::x), \
-            easywork::GetReturnType(&Self::x) \
-        } \
+        [] { \
+            easywork::RegisterMethodTypes(&Self::x); \
+            return easywork::MethodMeta{ \
+                easywork::CreateInvoker(&Self::x), \
+                easywork::GetArgTypes(&Self::x), \
+                easywork::GetReturnType(&Self::x) \
+            }; \
+        }() \
     },
 
 /**

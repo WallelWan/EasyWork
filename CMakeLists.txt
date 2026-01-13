@@ -113,11 +113,8 @@ file(GLOB_RECURSE SOURCES
 )
 
 # Runtime Library
-add_library(easywork_runtime STATIC
-    src/runtime/type_system.cpp
-    # Add other runtime source files if they exist (currently core.h etc are header-only or templated)
-)
-target_include_directories(easywork_runtime PUBLIC src)
+add_library(easywork_runtime INTERFACE)
+target_include_directories(easywork_runtime INTERFACE src)
 
 # Main Extension Module
 pybind11_add_module(easywork_core src/bindings/bindings.cpp)
@@ -136,11 +133,9 @@ set_target_properties(easywork_core PROPERTIES
 # --- 4. C++ Unit Tests ---
 enable_testing()
 
-add_executable(test_invoker src/runtime/test_invoker.cpp)
-target_link_libraries(test_invoker PRIVATE
-    easywork_runtime
-    ${OpenCV_LIBS}
-    spdlog::spdlog
-    Threads::Threads
+add_test(
+    NAME PythonTests
+    COMMAND ${Python3_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
-add_test(NAME test_invoker COMMAND test_invoker)
+set_tests_properties(PythonTests PROPERTIES ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python")

@@ -1,161 +1,49 @@
+#define EASYWORK_ENABLE_PYBIND
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "runtime/core.h"
-#include "runtime/node_registry.h"
-#include "runtime/modules.h"
+#include "runtime/core/core.h"
+#include "runtime/registry/node_registry.h"
+#include "modules/module_registry.h"
 #include "runtime/memory/frame.h"
-#include "runtime/type_system.h"
+#include "runtime/types/type_system.h"
+#include "runtime/types/type_converter.h"
 
 namespace py = pybind11;
 
 namespace {
 
-// --- Automatic Type Conversion Implementation ---
-
-/**
- * @brief Implements automatic conversion from Python objects to C++ types.
- * 
- * Registered as a hook in TypeSystem to be called by Value::cast.
- * Handles std::vector, std::string, numeric types, etc.
- */
-std::any PythonCastImplementation(const std::any& src_data, 
-                                 const std::type_info& src_type, 
-                                 const std::type_info& target_type) {
-    if (src_type != typeid(py::object)) {
-        return std::any();
-    }
-
-    try {
-        const py::object& obj = std::any_cast<const py::object&>(src_data);
-        
-        if (target_type == typeid(int)) return std::any(obj.cast<int>());
-        if (target_type == typeid(int64_t)) return std::any(obj.cast<int64_t>());
-        if (target_type == typeid(double)) return std::any(obj.cast<double>());
-        if (target_type == typeid(float)) return std::any(obj.cast<float>());
-        if (target_type == typeid(bool)) return std::any(obj.cast<bool>());
-        if (target_type == typeid(std::string)) return std::any(obj.cast<std::string>());
-        
-        if (target_type == typeid(std::vector<int>)) return std::any(obj.cast<std::vector<int>>());
-        if (target_type == typeid(std::vector<std::string>)) return std::any(obj.cast<std::vector<std::string>>());
-        if (target_type == typeid(std::vector<double>)) return std::any(obj.cast<std::vector<double>>());
-
-    } catch (...) {
-        // Cast failed
-    }
-    
-    return std::any();
+void RegisterPythonConverters() {
+    easywork::RegisterPythonType<py::object>();
 }
 
-// --- Strict Argument Conversion (for Open/Close where types are dynamic) ---
-
-/**
- * @brief Converts Python objects to Value during Open/Close calls.
- * 
- * Since Open/Close arguments are dynamic (std::vector<Packet>), we need to 
- * infer the type from the Python object. Only supports basic types.
- */
-easywork::Value StrictToValue(const py::handle& obj) {
-    if (obj.is_none()) {
-        return easywork::Value();
-    }
-    if (py::isinstance<py::bool_>(obj)) {
-        return easywork::Value(obj.cast<bool>());
-    }
-    if (py::isinstance<py::int_>(obj)) {
-        return easywork::Value(obj.cast<int64_t>());
-    }
-    if (py::isinstance<py::float_>(obj)) {
-        return easywork::Value(obj.cast<double>());
-    }
-    if (py::isinstance<py::str>(obj)) {
-        return easywork::Value(obj.cast<std::string>());
-    }
-    throw std::runtime_error("Unsupported type for Open/Close arguments. Only basic types (int, float, bool, str) are supported.");
-}
-
-// --- Smart Argument Conversion (for Invoke) ---
-
-/**
- * @brief Converts Python objects to Value based on target C++ type.
- * 
- * Used during method invocation where the target type is known from TypeInfo.
- * Supports complex conversions like list -> std::vector.
- */
-easywork::Value ConvertArg(const py::handle& obj, const easywork::TypeInfo& target_type) {
+std::any ConvertArg(const py::handle& obj, const easywork::TypeInfo& target_type) {
     if (target_type.type_info == &typeid(void)) {
          throw std::runtime_error("Cannot convert argument to 'void' or unknown type.");
     }
-
-    try {
-        if (*target_type.type_info == typeid(int)) return easywork::Value(obj.cast<int>());
-        if (*target_type.type_info == typeid(int64_t)) return easywork::Value(obj.cast<int64_t>());
-        if (*target_type.type_info == typeid(double)) return easywork::Value(obj.cast<double>());
-        if (*target_type.type_info == typeid(float)) return easywork::Value(obj.cast<float>());
-        if (*target_type.type_info == typeid(bool)) return easywork::Value(obj.cast<bool>());
-        if (*target_type.type_info == typeid(std::string)) return easywork::Value(obj.cast<std::string>());
-        
-        if (*target_type.type_info == typeid(std::vector<int>)) 
-            return easywork::Value(obj.cast<std::vector<int>>());
-        if (*target_type.type_info == typeid(std::vector<std::string>)) 
-            return easywork::Value(obj.cast<std::vector<std::string>>());
-        if (*target_type.type_info == typeid(std::vector<double>)) 
-            return easywork::Value(obj.cast<std::vector<double>>());
-
-        if (*target_type.type_info == typeid(py::object)) {
-             return easywork::Value(py::reinterpret_borrow<py::object>(obj));
-        }
-
+    std::any source = py::reinterpret_borrow<py::object>(obj);
+    std::any converted = easywork::TypeConverterRegistry::instance().convert(
+        source, typeid(py::object), *target_type.type_info);
+    if (!converted.has_value()) {
         throw std::runtime_error("No conversion handler for target type: " + target_type.type_name);
-
-    } catch (const py::cast_error& e) {
-        throw std::runtime_error("Failed to convert argument to " + target_type.type_name + ": " + e.what());
     }
+    return converted;
 }
 
-py::object FromValue(const easywork::Value& val) {
-    if (!val.has_value()) {
+py::object FromPacket(const easywork::Packet& packet) {
+    if (!packet.has_value()) {
         return py::none();
     }
-    auto type_info = val.type();
-    
-    if (type_info == easywork::TypeInfo::create<int64_t>()) {
-        return py::int_(val.cast<int64_t>());
+    auto type_info = packet.type();
+    const auto& registry = easywork::AnyToPyRegistry();
+    auto it = registry.find(type_info.type_index);
+    if (it == registry.end()) {
+        throw std::runtime_error("No Python converter registered for type: " + type_info.type_name);
     }
-    if (type_info == easywork::TypeInfo::create<int>()) {
-        return py::int_(val.cast<int>());
-    }
-    if (type_info == easywork::TypeInfo::create<double>()) {
-        return py::float_(val.cast<double>());
-    }
-    if (type_info == easywork::TypeInfo::create<float>()) {
-        return py::float_(val.cast<float>());
-    }
-    if (type_info == easywork::TypeInfo::create<bool>()) {
-        return py::bool_(val.cast<bool>());
-    }
-    if (type_info == easywork::TypeInfo::create<std::string>()) {
-        return py::str(val.cast<std::string>());
-    }
-    
-    if (type_info == easywork::TypeInfo::create<std::vector<int>>()) {
-        return py::cast(val.cast<std::vector<int>>());
-    }
-    if (type_info == easywork::TypeInfo::create<std::vector<double>>()) {
-        return py::cast(val.cast<std::vector<double>>());
-    }
-    if (type_info == easywork::TypeInfo::create<std::vector<std::string>>()) {
-        return py::cast(val.cast<std::vector<std::string>>());
-    }
-
-    try {
-        return val.cast<py::object>();
-    } catch (...) {
-        return py::str("<C++ Value: " + type_info.type_name + ">");
-    }
+    return it->second(packet.data());
 }
 
 } // namespace
@@ -163,7 +51,7 @@ py::object FromValue(const easywork::Value& val) {
 PYBIND11_MODULE(easywork_core, m) {
     m.doc() = "EasyWork Core (Taskflow + OpenCV) with C++20 Factory Pattern + Type System";
 
-    easywork::GetPythonCastHook() = PythonCastImplementation;
+    RegisterPythonConverters();
 
     m.attr("ID_FORWARD") = easywork::ID_FORWARD;
     m.attr("ID_OPEN") = easywork::ID_OPEN;
@@ -229,14 +117,14 @@ PYBIND11_MODULE(easywork_core, m) {
             
             if (it != type_info.methods.end() && it->second.input_types.size() == args.size()) {
                 for (size_t i = 0; i < args.size(); ++i) {
-                    inputs.push_back(easywork::Packet::From(
-                        ConvertArg(args[i], it->second.input_types[i]), 
+                    inputs.push_back(easywork::Packet::FromAny(
+                        ConvertArg(args[i], it->second.input_types[i]),
                         easywork::Packet::NowNs()
                     ));
                 }
             } else {
                 for (const auto& arg : args) {
-                    inputs.push_back(easywork::Packet::From(StrictToValue(arg), easywork::Packet::NowNs()));
+                    inputs.push_back(easywork::Packet::From(py::reinterpret_borrow<py::object>(arg), easywork::Packet::NowNs()));
                 }
             }
             node.Open(inputs);
@@ -252,14 +140,14 @@ PYBIND11_MODULE(easywork_core, m) {
             
             if (it != type_info.methods.end() && it->second.input_types.size() == args.size()) {
                 for (size_t i = 0; i < args.size(); ++i) {
-                    inputs.push_back(easywork::Packet::From(
-                        ConvertArg(args[i], it->second.input_types[i]), 
+                    inputs.push_back(easywork::Packet::FromAny(
+                        ConvertArg(args[i], it->second.input_types[i]),
                         easywork::Packet::NowNs()
                     ));
                 }
             } else {
                 for (const auto& arg : args) {
-                    inputs.push_back(easywork::Packet::From(StrictToValue(arg), easywork::Packet::NowNs()));
+                    inputs.push_back(easywork::Packet::From(py::reinterpret_borrow<py::object>(arg), easywork::Packet::NowNs()));
                 }
             }
             node.Close(inputs);
@@ -276,8 +164,8 @@ PYBIND11_MODULE(easywork_core, m) {
             
             if (it != type_info.methods.end() && it->second.input_types.size() == args.size()) {
                 for (size_t i = 0; i < args.size(); ++i) {
-                    inputs.push_back(easywork::Packet::From(
-                        ConvertArg(args[i], it->second.input_types[i]), 
+                    inputs.push_back(easywork::Packet::FromAny(
+                        ConvertArg(args[i], it->second.input_types[i]),
                         easywork::Packet::NowNs()
                     ));
                 }
@@ -295,7 +183,7 @@ PYBIND11_MODULE(easywork_core, m) {
             if (!result.has_value()) {
                 return py::object(py::none());
             }
-            return FromValue(*result.payload);
+            return FromPacket(result);
         })
         .def("set_input", &easywork::Node::set_input)
         .def("set_input_for", &easywork::Node::set_input_for)

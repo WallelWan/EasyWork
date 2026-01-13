@@ -7,7 +7,7 @@ EasyWork is a computational graph execution framework based on Taskflow static s
 Key Features:
 - **C++ Runtime**: High-performance node system and scheduling engine, implementing static graph scheduling based on Taskflow.
 - **Python API**: Concise data flow graph construction interface supporting type checking and automatic topology building.
-- **Type System**: `Value` type-erased container and `TypeInfo` reflection mechanism, supporting compile-time and runtime type safety.
+- **Type System**: `Packet` with `std::any` payload + `TypeInfo` reflection, connect-time checks, and precompiled casting.
 - **Heterogeneous Method Support**: Nodes support multiple input/control methods with different signatures (C++20 reflection mechanism).
 - **Extensibility**: Easily register new nodes via C++20 factory patterns and macros.
 
@@ -15,26 +15,32 @@ Key Features:
 
 ```
 prototype/
-├── src/                    # C++ Source Code
-│   ├── runtime/            # Runtime Core
-│   │   ├── core.h          # Core Execution Engine (Taskflow integration, BaseNode implementation)
-│   │   ├── type_system.h   # Type System (TypeInfo, Value, Packet)
-│   │   ├── node_registry.h # Node Registration Mechanism & C++20 Factory Pattern
-│   │   ├── macros.h        # Macro Definitions (EW_ENABLE_METHODS, EW_REGISTER_NODE)
-│   │   ├── modules.h       # Module Aggregation Header
-│   │   └── memory/         # Memory Management
-│   │       └── frame.h     # FrameBuffer Data Structure (Supports Python Buffer Protocol)
-│   ├── bindings/           # Python Bindings
-│   │   └── bindings.cpp    # Pybind11 Binding Code
-│   └── module/             # Node Implementation Examples
-│       └── example_typed_nodes.h
-├── python/                 # Python Package
+├── src/                      # C++ Source Code
+│   ├── runtime/              # Runtime Core
+│   │   ├── core/             # Execution engine, dispatch
+│   │   │   ├── core.h
+│   │   │   └── dispatch_unit.h
+│   │   ├── types/            # Type system + converters
+│   │   │   ├── type_system.h
+│   │   │   ├── type_converter.h
+│   │   │   └── type_traits.h
+│   │   ├── registry/         # Node registry + macros
+│   │   │   ├── node_registry.h
+│   │   │   └── macros.h
+│   │   └── memory/           # Memory Management
+│   │       └── frame.h       # FrameBuffer Data Structure (Python Buffer Protocol)
+│   ├── modules/              # Node modules (moved out of runtime)
+│   │   ├── module_registry.h
+│   │   └── example_typed_nodes.h
+│   └── bindings/             # Python Bindings
+│       └── bindings.cpp      # Pybind11 Binding Code
+├── python/                   # Python Package
 │   └── easywork/
-│       ├── __init__.py     # Main API (Pipeline, NodeWrapper)
-│       └── *.so            # Compiled C++ Extension
-├── tests/                  # Test Files
-├── extern/                 # External Dependencies (Taskflow, etc.)
-└── CMakeLists.txt          # Build Configuration
+│       ├── __init__.py       # Main API (Pipeline, NodeWrapper)
+│       └── *.so              # Compiled C++ Extension
+├── tests/                    # Test Files
+├── extern/                   # External Dependencies (Taskflow, etc.)
+└── CMakeLists.txt            # Build Configuration
 ```
 
 ## 3. Architecture and Execution Model
@@ -52,7 +58,7 @@ Each node inherits from `BaseNode` and has a complete lifecycle:
 2. **Connect**: Establishes `precede/succeed` dependency relationships between tasks.
 3. **Activate**: Activates the node (e.g., Source node prepares data).
 4. **Open(args, kwargs)**: Resource initialization (user-overridable).
-5. **Process**: Data processing loop (automatically scheduled via `RunDispatch` or `RunSourceLoop` by the framework).
+5. **Process**: Data processing loop (automatically scheduled via `RunDispatch` by the framework).
 6. **Close()**: Resource release (user-overridable).
 
 ### 3.3 Four-Stage Execution Flow (Pipeline.run)
@@ -82,7 +88,7 @@ The framework generates `TypeInfo` using C++ RTTI and template metaprogramming. 
 ### 4.2 Packet and Timestamps
 
 Data is passed between nodes as `Packet` objects:
-- **Payload**: Carries a `Value` of any type (supports basic types, std::vector, custom structs, etc.).
+- **Payload**: `std::shared_ptr<std::any>` storing typed data with zero-copy fan-out.
 - **Timestamp**: Nanosecond-level timestamp, used for synchronization mechanisms like `SyncBarrier`.
 
 ### 4.3 Automatic Tuple Handling
@@ -92,10 +98,11 @@ Data is passed between nodes as `Packet` objects:
 
 ### 4.4 Automatic Type Conversion
 
-EasyWork integrates `pybind11`'s powerful type conversion mechanism, enabling fully automatic bidirectional conversion between Python objects and C++ types.
+EasyWork builds conversion tables from C++ method signatures at registration time. Python inputs are converted via registered `pybind11::cast<T>()`, and node-to-node conversions are precompiled at connect time.
 
-- **Complex Type Support**: In addition to basic types (`int`, `float`, `str`), you can now directly pass Python `list` to C++ `std::vector`, `dict` to `std::map`, etc.
-- **Custom Objects**: Any C++ class registered via `pybind11` can be automatically converted from its Python object representation.
+- **No Manual Type Lists**: Supported types are derived from C++ method and constructor signatures.
+- **Precompiled Casts**: Connections inject deterministic converters (`AnyCaster`) for arithmetic promotion.
+- **Custom Objects**: Any C++ class registered via `pybind11` is eligible once used in a method signature.
 
 **Example: Passing a List to C++ Vector**
 
@@ -125,8 +132,8 @@ print(result) # Output: 6
 Inherit from `BaseNode<Derived>`. Generic parameters for input/output types are no longer needed. Use the `EW_ENABLE_METHODS` macro to automatically export methods and generate reflection information.
 
 ```cpp
-#include "runtime/core.h"
-#include "runtime/node_registry.h"
+#include "runtime/core/core.h"
+#include "runtime/registry/node_registry.h"
 
 using namespace easywork;
 
@@ -189,18 +196,22 @@ class MyPipeline(ew.Pipeline):
     def __init__(self):
         super().__init__()
         self.src = ew.module.NumberSource(start=0, max=10)
-        self.proc = ew.module.MyMath()
-        self.sink = ew.module.NumberSink()
+        self.scale = ew.module.MultiplyBy(factor=2)
+        self.to_text = ew.module.IntToText()
+        self.prefix = ew.module.PrefixText(prefix="[Value] ")
+        self.mixed = ew.module.MixedNode()
 
     def construct(self):
         # Default connection to forward method
-        self.proc(self.src())
-        
-        # Connection to specific method
-        self.proc.set_scale(ew.module.ConfigProvider().read())
-        
-        # Chained connection
-        self.sink(self.proc.read())
+        scaled = self.scale(self.src())
+        text = self.to_text(scaled)
+        prefixed = self.prefix(text)
+
+        # Connection to a specific method
+        self.mixed.set_string(prefixed)
+
+        # Chained connection to forward
+        self.mixed(scaled)
 ```
 
 ### 6.2 Running and Monitoring
@@ -223,8 +234,9 @@ pipeline.close()
 
 ### 6.3 Performance Monitoring Interface
 
-- `ew.get_method_dispatch_counts()`: Get method dispatch statistics (for debugging).
-- `ew.get_small_tracked_live_count()`: Monitor object lifecycle.
+- `ew.get_method_dispatch_counts()`: Get method dispatch statistics (left/right/forward counts).
+- `ew.get_method_dispatch_order_errors()`: Get count of dispatch order violations (for `set_method_order` debugging).
+- `ew.get_small_tracked_live_count()`: Monitor object lifecycle (SBO optimization testing).
 
 ### 6.4 Immediate Execution vs Graph Construction (Eager vs Tracing)
 
@@ -256,9 +268,9 @@ pipeline.run()
 
 ## 7. Advanced Features
 
-### 7.1 SyncBarrier
+### 7.1 SyncBarrier (C++ Only)
 
-`SyncBarrier` is a special built-in node for multi-channel input timestamp alignment. It buffers inputs from multiple ports until a set of data within the timestamp tolerance is found, packaging them into a Tuple output.
+`SyncBarrier` is a special built-in node for multi-channel input timestamp alignment. It buffers inputs from multiple ports until a set of data within the timestamp tolerance is found, packaging them into a Tuple output. Currently, this node is only available for C++ graph construction.
 
 ```cpp
 // Usage on C++ side
@@ -282,6 +294,6 @@ Provides a `FrameBuffer` structure supporting the Python Buffer Protocol. Images
 
 ## 9. Future Roadmap
 
-- **AST Parsing & Native Control Flow**: Implement AST analysis (similar to Numba/Triton) to support native Python `if/else`, `for/while` syntax within graph construction, replacing the temporary `ew.If(...)` syntax sugar.
+- **AST Parsing & Native Control Flow**: Implement AST analysis (similar to Numba/Triton) to support native Python `if/else`, `for/while` syntax within graph construction, replacing the need for specialized flow control nodes.
 - **Distributed Execution**: Extend Taskflow integration to support distributed graph execution across multiple nodes.
 - **Enhanced Visualization**: Provide tools to visualize the generated execution graph for easier debugging and optimization.

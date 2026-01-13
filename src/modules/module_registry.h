@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file modules.h
+ * @file module_registry.h
  * @brief Unified header for all EasyWork node modules
  *
  * Each node module is self-contained with:
@@ -19,9 +19,9 @@
  * - SmallTrackedSource/SmallTrackedConsumer: SBO safety check
  *
  * Usage:
- *   #include "runtime/modules.h"  // Include all modules
+ *   #include "modules/module_registry.h"  // Include all modules
  *   or
- *   #include "runtime/module/example_typed_nodes.h"  // Include specific module
+ *   #include "modules/example_typed_nodes.h"  // Include specific module
  */
 
-#include "module/example_typed_nodes.h"
+#include "example_typed_nodes.h"

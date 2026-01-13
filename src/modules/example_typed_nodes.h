@@ -1,8 +1,8 @@
 #pragma once
 
-#include "../core.h"
-#include "../node_registry.h"
-#include "../macros.h"
+#include "runtime/core/core.h"
+#include "runtime/registry/node_registry.h"
+#include "runtime/registry/macros.h"
 #include <atomic>
 #include <string>
 #include <tuple>

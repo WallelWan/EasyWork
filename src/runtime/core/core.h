@@ -20,9 +20,11 @@
 #include <deque>
 #include <algorithm>
 #include <limits>
-#include "memory/frame.h"
-#include "type_system.h"
-#include "macros.h"
+#include "runtime/memory/frame.h"
+#include "runtime/types/type_system.h"
+#include "dispatch_unit.h"
+#include "runtime/types/type_converter.h"
+#include "runtime/registry/macros.h"
 
 namespace easywork {
 
@@ -541,21 +543,9 @@ public:
 
     void build(ExecutionGraph& g) override {
         graph_ = &g;
-        // Check if we are a source (forward has 0 args)
-        bool is_source = false;
-        const auto& registry = Derived::method_registry();
-        if (auto it = registry.find(ID_FORWARD); it != registry.end()) {
-            if (it->second.arg_types.empty()) {
-                is_source = true;
-            }
-        }
-
-        task_ = g.taskflow.emplace([this, is_source, &g]() {
-            if (is_source) {
-                RunSourceLoop();
-            } else {
-                RunDispatch();
-            }
+        
+        task_ = g.taskflow.emplace([this]() {
+            RunDispatch();
         });
         
         task_.name(TypeInfo::create<Derived>().type_name);
@@ -581,6 +571,7 @@ public:
                 conn.node->get_task().precede(task_);
             }
         }
+        PrepareInputConverters();
     }
 
     Packet invoke(size_t method_id, const std::vector<Packet>& inputs) override {
@@ -594,31 +585,73 @@ public:
     }
 
 protected:
-    void RunSourceLoop() {
+    void PrepareInputConverters() {
+        RegisterArithmeticConversions();
+        input_converters_.clear();
         const auto& registry = Derived::method_registry();
-        auto it = registry.find(ID_FORWARD);
-        if (it == registry.end()) {
-            output_packet_ = Packet::Empty();
-            return;
-        }
 
-        try {
-            // Invoke forward with empty inputs
-            std::vector<Packet> empty_inputs;
-            Packet result = it->second.invoker(this, empty_inputs);
-            
-            // Timestamp handling
-            int64_t ts = Packet::NowNs();
-            if (result.has_value()) {
-                 if (result.timestamp == 0) result.timestamp = ts;
-                 output_packet_ = std::move(result);
-            } else {
-                 output_packet_ = Packet::Empty();
+        for (const auto& [method_id, meta] : registry) {
+            std::vector<size_t> ports = PortsForMethod(method_id);
+            if (ports.empty()) {
+                continue;
             }
-        } catch (const std::exception& e) {
-            std::cerr << "Source Error: " << e.what() << std::endl;
-            output_packet_ = Packet::Empty();
+            if (ports.size() != meta.arg_types.size()) {
+                throw std::runtime_error(
+                    "Port count mismatch for method " + std::to_string(method_id) +
+                    ": expected " + std::to_string(meta.arg_types.size()) +
+                    ", got " + std::to_string(ports.size()));
+            }
+
+            std::vector<AnyCaster> converters;
+            converters.reserve(ports.size());
+
+            for (size_t i = 0; i < ports.size(); ++i) {
+                size_t port_index = ports[i];
+                Node* upstream = upstreams_[port_index].node;
+                if (!upstream) {
+                    throw std::runtime_error("Null upstream connection for port " + std::to_string(port_index));
+                }
+                TypeInfo from_type = UpstreamOutputType(upstream);
+                const TypeInfo& to_type = meta.arg_types[i];
+
+                if (from_type == to_type) {
+                    converters.emplace_back();
+                    continue;
+                }
+
+                if (!TypeConverterRegistry::instance().has_converter(*from_type.type_info, *to_type.type_info)) {
+                    throw std::runtime_error(
+                        "Type mismatch: cannot connect " + from_type.type_name +
+                        " to " + to_type.type_name);
+                }
+
+                converters.emplace_back([from_type, to_type](const Packet& packet) {
+                    if (!packet.has_value()) {
+                        return Packet::Empty();
+                    }
+                    std::any converted = TypeConverterRegistry::instance().convert(
+                        packet.data(), *from_type.type_info, *to_type.type_info);
+                    if (!converted.has_value()) {
+                        throw std::runtime_error(
+                            "Failed to convert " + from_type.type_name + " to " + to_type.type_name);
+                    }
+                    return Packet::FromAny(std::move(converted), packet.timestamp);
+                });
+            }
+            input_converters_.emplace(method_id, std::move(converters));
         }
+    }
+
+    TypeInfo UpstreamOutputType(Node* node) const {
+        if (!node) {
+            return TypeInfo::create<void>();
+        }
+        NodeTypeInfo info = node->get_type_info();
+        auto it = info.methods.find(ID_FORWARD);
+        if (it == info.methods.end()) {
+            return TypeInfo::create<void>();
+        }
+        return it->second.output_type;
     }
 
     void RunDispatch() {
@@ -657,11 +690,21 @@ protected:
                 // Check Data Availability
                 if (!PortsHaveData(ports)) continue;
 
+                const auto converter_it = input_converters_.find(method_id);
+                const std::vector<AnyCaster>* converters =
+                    converter_it != input_converters_.end() ? &converter_it->second : nullptr;
+
                 // Collect Arguments
                 std::vector<Packet> inputs;
                 inputs.reserve(required_args);
-                for (size_t idx : ports) {
-                    inputs.push_back(port_buffers_[idx].front());
+                for (size_t i = 0; i < ports.size(); ++i) {
+                    size_t idx = ports[i];
+                    const Packet& raw_packet = port_buffers_[idx].front();
+                    if (converters && i < converters->size() && (*converters)[i]) {
+                        inputs.push_back((*converters)[i](raw_packet));
+                    } else {
+                        inputs.push_back(raw_packet);
+                    }
                     // Consume the input packet immediately
                     port_buffers_[idx].pop_front();
                 }
@@ -674,8 +717,13 @@ protected:
                 // Usually only 'forward' returns data. Control methods return void (Empty Packet).
                 if (result.has_value()) {
                     // Propagate timestamp if needed
-                    if (result.timestamp == 0 && !inputs.empty()) {
-                         result.timestamp = inputs[0].timestamp; // Inherit from first arg
+                    if (result.timestamp == 0) {
+                        if (!inputs.empty()) {
+                             result.timestamp = inputs[0].timestamp; // Inherit from first arg
+                        } else {
+                             // Source generation or 0-arg method: use current time
+                             result.timestamp = Packet::NowNs();
+                        }
                     }
                     output_packet_ = std::move(result);
                     output_produced = true;
@@ -691,6 +739,8 @@ protected:
             output_packet_ = Packet::Empty();
         }
     }
+
+    std::unordered_map<size_t, std::vector<AnyCaster>> input_converters_;
 };
 
 // ========== SyncBarrier ==========
@@ -836,8 +886,8 @@ struct TupleRegistryEntry {
     std::function<std::shared_ptr<Node>(size_t)> factory;
 };
 
-inline std::unordered_map<size_t, TupleRegistryEntry>& TupleRegistry() {
-    static std::unordered_map<size_t, TupleRegistryEntry> registry;
+inline std::unordered_map<std::type_index, TupleRegistryEntry>& TupleRegistry() {
+    static std::unordered_map<std::type_index, TupleRegistryEntry> registry;
     return registry;
 }
 
@@ -865,7 +915,7 @@ template<typename TupleT>
 inline bool RegisterTupleType() {
     static_assert(std::tuple_size_v<TupleT> > 0, "Tuple type must not be empty");
     const auto type_info = TypeInfo::create<TupleT>();
-    const auto type_key = type_info.type_hash;
+    const auto type_key = type_info.type_index;
     std::lock_guard<std::mutex> lock(detail::TupleRegistryMutex());
     auto& registry = detail::TupleRegistry();
     if (registry.contains(type_key)) {
@@ -884,7 +934,7 @@ inline bool RegisterTupleType() {
 inline std::shared_ptr<Node> CreateTupleGetNode(const TypeInfo& tuple_type, size_t index) {
     std::lock_guard<std::mutex> lock(detail::TupleRegistryMutex());
     auto& registry = detail::TupleRegistry();
-    auto it = registry.find(tuple_type.type_hash);
+    auto it = registry.find(tuple_type.type_index);
     if (it == registry.end()) {
         throw std::runtime_error("Tuple type not registered for TupleGetNode");
     }
@@ -897,7 +947,7 @@ inline std::shared_ptr<Node> CreateTupleGetNode(const TypeInfo& tuple_type, size
 inline size_t GetTupleSize(const TypeInfo& tuple_type) {
     std::lock_guard<std::mutex> lock(detail::TupleRegistryMutex());
     auto& registry = detail::TupleRegistry();
-    auto it = registry.find(tuple_type.type_hash);
+    auto it = registry.find(tuple_type.type_index);
     if (it == registry.end()) {
         return 0;
     }

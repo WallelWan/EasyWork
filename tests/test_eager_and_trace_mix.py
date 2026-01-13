@@ -125,7 +125,7 @@ def test_eager_bad_args():
     # 参数类型错误 (C++ 抛出异常 -> Python RuntimeError)
     with pytest.raises(RuntimeError) as exc:
         multiplier("not an int")
-    assert "Failed to convert argument" in str(exc.value)
+    assert "No conversion handler for target type" in str(exc.value)
     
     # 参数数量错误
     with pytest.raises(RuntimeError) as exc:
