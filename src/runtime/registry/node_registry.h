@@ -95,15 +95,15 @@ namespace detail {
         if (args.size() > index) {
             try {
                 return args[index].cast<T>();
-            } catch (...) {
-                return default_val;
+            } catch (const std::exception&) {
+                throw std::runtime_error("Failed to parse argument '" + std::string(name) + "'");
             }
         }
         if (kwargs && kwargs.contains(name)) {
             try {
                 return kwargs[name].cast<T>();
-            } catch (...) {
-                return default_val;
+            } catch (const std::exception&) {
+                throw std::runtime_error("Failed to parse argument '" + std::string(name) + "'");
             }
         }
         return default_val;

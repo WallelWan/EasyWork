@@ -23,6 +23,15 @@ The system automatically registers common arithmetic promotions (`int` -> `float
 ### 2.3 Compile-Time Traits
 `src/runtime/types/type_traits.h` defines `Converter<From, To>` structs that determine at compile-time if a safe conversion is possible, preventing unsafe casts (like `double` -> `int` lossy conversion) by default.
 
+### 2.4 Validation Behavior
+
+The Python validation step accepts:
+
+- Exact type matches.
+- Registered converters, when the core extension exposes the conversion registry to Python.
+
+When the extension is built without converter exposure, validation defaults to strict type equality.
+
 ## 3. Packet & std::any
 
 The `Packet` class (defined in `core.h` but heavily relying on the type system) uses `std::any` to store data.

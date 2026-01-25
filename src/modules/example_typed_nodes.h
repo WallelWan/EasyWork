@@ -16,12 +16,16 @@ public:
         : current_(start), max_(max), step_(step) {}
 
     int forward() {
-        if (current_ > max_) {
+        if (step_ == 0) {
+            Stop();
+            throw std::runtime_error("NumberSource step cannot be 0");
+        }
+        if ((step_ > 0 && current_ > max_) || (step_ < 0 && current_ < max_)) {
             Stop();
             return 0;
         }
         int value = current_;
-        if (current_ >= max_) {
+        if ((step_ > 0 && current_ + step_ > max_) || (step_ < 0 && current_ + step_ < max_)) {
             Stop();
         }
         current_ += step_;
@@ -90,9 +94,7 @@ EW_REGISTER_NODE(PrefixText, "PrefixText", Arg("prefix", std::string("[Prefix] "
 class PairEmitter : public BaseNode<PairEmitter> {
 public:
     PairEmitter(int start, int max)
-        : current_(start), max_(max) {
-            RegisterTupleType<std::tuple<int, std::string>>();
-        }
+        : current_(start), max_(max) {}
 
     std::tuple<int, std::string> forward() {
         if (current_ > max_) {

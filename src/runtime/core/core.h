@@ -15,6 +15,7 @@
 #include <string>
 #include <utility>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 #include <functional>
 #include <deque>
@@ -228,17 +229,24 @@ public:
     struct UpstreamConnection {
         Node* node;
         size_t method_id;
+        bool weak{false};
     };
 
     struct PortInfo {
         size_t index;
         size_t method_id;
+        int arg_index;
         bool is_control;
     };
 
     struct MethodConfig {
         bool sync_enabled{false};
         size_t max_queue{0};
+    };
+    
+    struct MuxConfig {
+        Node* control_node;
+        std::unordered_map<int, Node*> map;
     };
 
     std::vector<UpstreamConnection> upstreams_;
@@ -248,17 +256,38 @@ public:
     std::unordered_map<size_t, MethodConfig> method_configs_;
     std::vector<size_t> method_order_;
     bool method_order_customized_{false};
+    std::unordered_map<size_t, std::unordered_map<int, MuxConfig>> mux_configs_;
+    std::unordered_map<size_t, AnyCaster> port_converters_;
 
-    void add_upstream(Node* n, std::string method = {}) {
+    void add_upstream(Node* n, std::string method = {}, int arg_idx = -1, bool weak = false) {
         size_t id = method.empty() ? ID_FORWARD : hash_string(method);
         size_t index = upstreams_.size();
-        upstreams_.push_back({n, id});
-        port_map_.push_back({index, id, id != ID_FORWARD});
+        
+        int actual_arg_idx = arg_idx;
+        if (actual_arg_idx == -1) {
+            actual_arg_idx = 0;
+            for(const auto& p : port_map_) {
+                if(p.method_id == id) {
+                    actual_arg_idx = std::max(actual_arg_idx, p.arg_index + 1);
+                }
+            }
+        }
+
+        upstreams_.push_back({n, id, weak});
+        port_map_.push_back({index, id, actual_arg_idx, id != ID_FORWARD});
         upstream_methods_debug_.push_back(std::move(method));
         port_buffers_.emplace_back();
         if (!method_order_customized_) {
             RegisterMethodOrder(id);
         }
+    }
+    
+    void add_control_input(Node* n) {
+        size_t index = upstreams_.size();
+        upstreams_.push_back({n, 0});
+        port_map_.push_back({index, 0, -1, true});
+        upstream_methods_debug_.push_back("CONTROL");
+        port_buffers_.emplace_back();
     }
 
     void ClearUpstreams() {
@@ -266,6 +295,8 @@ public:
         port_map_.clear();
         upstream_methods_debug_.clear();
         port_buffers_.clear();
+        mux_configs_.clear();
+        port_converters_.clear();
         if (!method_order_customized_) {
             method_order_.clear();
         }
@@ -305,6 +336,10 @@ public:
 
     bool IsOpen() const { return opened_; }
 
+    void ClearOutput() {
+        output_packet_ = Packet::Empty();
+    }
+
     virtual void Activate() {}
     
     void Stop() {
@@ -314,16 +349,28 @@ public:
         }
     }
 
-    virtual void set_input(Node* upstream) {
-        add_upstream(upstream);
+    virtual void set_input(Node* upstream, int arg_idx = -1) {
+        add_upstream(upstream, {}, arg_idx);
+    }
+
+    virtual void set_weak_input(Node* upstream, int arg_idx = -1) {
+        add_upstream(upstream, {}, arg_idx, true);
     }
     
-    virtual void set_input_for(const std::string& method, Node* upstream) {
+    virtual void set_input_for(const std::string& method, Node* upstream, int arg_idx = -1) {
         if (method.empty() || method == "forward") {
-            set_input(upstream);
+            set_input(upstream, arg_idx);
             return;
         }
-        add_upstream(upstream, method);
+        add_upstream(upstream, method, arg_idx);
+    }
+    
+    void SetInputMux(const std::string& method, int arg_idx, Node* control, const std::unordered_map<int, Node*>& map) {
+        size_t id = method.empty() || method == "forward" ? ID_FORWARD : hash_string(method);
+        mux_configs_[id][arg_idx] = {control, map};
+        bool control_found = false;
+        for(const auto& u : upstreams_) { if(u.node == control) control_found = true; }
+        if(!control_found) add_control_input(control);
     }
 
     void SetMethodOrder(const std::vector<std::string>& methods) {
@@ -409,47 +456,24 @@ protected:
         }
     }
 
-    std::vector<size_t> PortsForMethod(size_t method_id) const {
-        std::vector<size_t> ports;
-        for (size_t i = 0; i < port_map_.size(); ++i) {
-            if (port_map_[i].method_id == method_id) {
-                ports.push_back(i);
+    int FindPortIndex(Node* upstream, size_t method_id, int arg_idx) const {
+        for(size_t i=0; i<port_map_.size(); ++i) {
+            if (port_map_[i].method_id == method_id && 
+                port_map_[i].arg_index == arg_idx && 
+                upstreams_[i].node == upstream) {
+                return static_cast<int>(i);
             }
         }
-        return ports;
+        return -1;
     }
-
-    bool PortsHaveData(const std::vector<size_t>& ports) const {
-        for (size_t index : ports) {
-            if (index >= port_buffers_.size() || port_buffers_[index].empty()) {
-                return false;
+    
+    int FindControlPortIndex(Node* control) const {
+        for(size_t i=0; i<port_map_.size(); ++i) {
+            if (port_map_[i].is_control && upstreams_[i].node == control) {
+                return static_cast<int>(i);
             }
         }
-        return true;
-    }
-
-    int64_t MinTimestamp(const std::vector<size_t>& ports) const {
-        int64_t min_ts = std::numeric_limits<int64_t>::max();
-        for (size_t index : ports) {
-            min_ts = std::min(min_ts, port_buffers_[index].front().timestamp);
-        }
-        return min_ts == std::numeric_limits<int64_t>::max() ? 0 : min_ts;
-    }
-
-    int64_t MaxTimestamp(const std::vector<size_t>& ports) const {
-        int64_t max_ts = 0;
-        for (size_t index : ports) {
-            max_ts = std::max(max_ts, port_buffers_[index].front().timestamp);
-        }
-        return max_ts;
-    }
-
-    void DropEarliest(const std::vector<size_t>& ports, int64_t min_ts) {
-        for (size_t index : ports) {
-            if (!port_buffers_[index].empty() && port_buffers_[index].front().timestamp == min_ts) {
-                port_buffers_[index].pop_front();
-            }
-        }
+        return -1;
     }
     
     const std::vector<size_t>& EffectiveMethodOrder() const {
@@ -502,12 +526,6 @@ private:
 };
 
 namespace detail {
-// Helper trait to check if a type is std::tuple
-template <typename T> struct is_tuple_impl : std::false_type {};
-template <typename... Ts> struct is_tuple_impl<std::tuple<Ts...>> : std::true_type {};
-template <typename T> struct is_tuple : is_tuple_impl<std::decay_t<T>> {};
-template <typename T> inline constexpr bool is_tuple_v = is_tuple<T>::value;
-
 template<typename Derived, typename MethodTable>
 inline constexpr bool has_method_table_v = requires {
     { Derived::method_table() } -> std::same_as<MethodTable>;
@@ -567,7 +585,7 @@ public:
     void connect() override {
         // Build precedences
         for (const auto& conn : upstreams_) {
-            if (conn.node) {
+            if (conn.node && !conn.weak) {
                 conn.node->get_task().precede(task_);
             }
         }
@@ -587,58 +605,56 @@ public:
 protected:
     void PrepareInputConverters() {
         RegisterArithmeticConversions();
-        input_converters_.clear();
+        port_converters_.clear();
         const auto& registry = Derived::method_registry();
 
         for (const auto& [method_id, meta] : registry) {
-            std::vector<size_t> ports = PortsForMethod(method_id);
-            if (ports.empty()) {
-                continue;
-            }
-            if (ports.size() != meta.arg_types.size()) {
-                throw std::runtime_error(
-                    "Port count mismatch for method " + std::to_string(method_id) +
-                    ": expected " + std::to_string(meta.arg_types.size()) +
-                    ", got " + std::to_string(ports.size()));
-            }
-
-            std::vector<AnyCaster> converters;
-            converters.reserve(ports.size());
-
-            for (size_t i = 0; i < ports.size(); ++i) {
-                size_t port_index = ports[i];
-                Node* upstream = upstreams_[port_index].node;
-                if (!upstream) {
-                    throw std::runtime_error("Null upstream connection for port " + std::to_string(port_index));
-                }
-                TypeInfo from_type = UpstreamOutputType(upstream);
+            for (size_t i = 0; i < meta.arg_types.size(); ++i) {
                 const TypeInfo& to_type = meta.arg_types[i];
-
-                if (from_type == to_type) {
-                    converters.emplace_back();
-                    continue;
-                }
-
-                if (!TypeConverterRegistry::instance().has_converter(*from_type.type_info, *to_type.type_info)) {
-                    throw std::runtime_error(
-                        "Type mismatch: cannot connect " + from_type.type_name +
-                        " to " + to_type.type_name);
-                }
-
-                converters.emplace_back([from_type, to_type](const Packet& packet) {
-                    if (!packet.has_value()) {
-                        return Packet::Empty();
+                
+                // Check if Muxed
+                std::vector<Node*> potential_sources;
+                if (mux_configs_[method_id].count(i)) {
+                    const auto& cfg = mux_configs_[method_id][i];
+                    for(const auto& pair : cfg.map) potential_sources.push_back(pair.second);
+                } else {
+                    // Find standard upstream
+                    for(const auto& u : upstreams_) {
+                        int idx = FindPortIndex(u.node, method_id, i);
+                        if(idx != -1) {
+                            potential_sources.push_back(u.node);
+                            break; 
+                        }
                     }
-                    std::any converted = TypeConverterRegistry::instance().convert(
-                        packet.data(), *from_type.type_info, *to_type.type_info);
-                    if (!converted.has_value()) {
+                }
+                
+                for(Node* src : potential_sources) {
+                    int port_index = FindPortIndex(src, method_id, i);
+                    if (port_index == -1) continue; 
+                    
+                    TypeInfo from_type = UpstreamOutputType(src);
+                    if (from_type == to_type) continue;
+                    
+                    if (!TypeConverterRegistry::instance().has_converter(*from_type.type_info, *to_type.type_info)) {
                         throw std::runtime_error(
-                            "Failed to convert " + from_type.type_name + " to " + to_type.type_name);
+                            "Type mismatch: cannot connect " + from_type.type_name +
+                            " to " + to_type.type_name);
                     }
-                    return Packet::FromAny(std::move(converted), packet.timestamp);
-                });
+                    
+                    port_converters_[port_index] = [from_type, to_type](const Packet& packet) {
+                        if (!packet.has_value()) {
+                            return Packet::Empty();
+                        }
+                        std::any converted = TypeConverterRegistry::instance().convert(
+                            packet.data(), *from_type.type_info, *to_type.type_info);
+                        if (!converted.has_value()) {
+                            throw std::runtime_error(
+                                "Failed to convert " + from_type.type_name + " to " + to_type.type_name);
+                        }
+                        return Packet::FromAny(std::move(converted), packet.timestamp);
+                    };
+                }
             }
-            input_converters_.emplace(method_id, std::move(converters));
         }
     }
 
@@ -664,64 +680,106 @@ protected:
             bool output_produced = false;
 
             for (size_t method_id : order) {
-                std::vector<size_t> ports = PortsForMethod(method_id);
                 auto it = registry.find(method_id);
                 if (it == registry.end()) continue;
-
-                size_t required_args = it->second.arg_types.size();
                 
-                // Simple strict check: connected ports must match argument count
-                if (ports.size() != required_args) {
-                    continue; 
-                }
-
-                // Check Sync
-                const auto& config = GetMethodConfig(method_id);
-                if (config.sync_enabled) {
-                    if (!PortsHaveData(ports)) continue;
-                    int64_t min_ts = MinTimestamp(ports);
-                    int64_t max_ts = MaxTimestamp(ports);
-                    if (max_ts != min_ts) {
-                        DropEarliest(ports, min_ts);
-                        continue;
-                    }
-                }
-
-                // Check Data Availability
-                if (!PortsHaveData(ports)) continue;
-
-                const auto converter_it = input_converters_.find(method_id);
-                const std::vector<AnyCaster>* converters =
-                    converter_it != input_converters_.end() ? &converter_it->second : nullptr;
-
-                // Collect Arguments
+                size_t required_args = it->second.arg_types.size();
                 std::vector<Packet> inputs;
                 inputs.reserve(required_args);
-                for (size_t i = 0; i < ports.size(); ++i) {
-                    size_t idx = ports[i];
-                    const Packet& raw_packet = port_buffers_[idx].front();
-                    if (converters && i < converters->size() && (*converters)[i]) {
-                        inputs.push_back((*converters)[i](raw_packet));
+                
+                bool method_ready = true;
+                std::unordered_set<int> popped_controls;
+                
+                for(size_t i=0; i<required_args; ++i) {
+                    // Check Mux
+                    int selected_port = -1;
+                    std::vector<int> discarded_ports;
+                    
+                    if (mux_configs_[method_id].count(i)) {
+                        const auto& cfg = mux_configs_[method_id][i];
+                        int control_port = FindControlPortIndex(cfg.control_node);
+                        if (control_port != -1 && !port_buffers_[control_port].empty()) {
+                            Packet control_pkt = port_buffers_[control_port].front(); 
+                            
+                            int choice = -1;
+                            try {
+                                if (control_pkt.type() == TypeInfo::create<bool>()) {
+                                    choice = control_pkt.cast<bool>() ? 0 : 1;
+                                } else if (control_pkt.type() == TypeInfo::create<int>()) {
+                                    choice = control_pkt.cast<int>();
+                                } else if (control_pkt.type() == TypeInfo::create<int64_t>()) {
+                                    choice = static_cast<int>(control_pkt.cast<int64_t>());
+                                } else {
+                                    throw std::runtime_error("Mux control packet must be bool or int");
+                                }
+                            } catch (const std::exception&) {
+                                throw;
+                            }
+                            
+                            auto map_it = cfg.map.find(choice);
+                            if (map_it != cfg.map.end()) {
+                                selected_port = FindPortIndex(map_it->second, method_id, i);
+                            } else {
+                                throw std::runtime_error("Mux control value has no mapping");
+                            }
+                            
+                            for(const auto& pair : cfg.map) {
+                                if (pair.first != choice) {
+                                    int p_idx = FindPortIndex(pair.second, method_id, i);
+                                    if(p_idx != -1) discarded_ports.push_back(p_idx);
+                                }
+                            }
+                        }
                     } else {
-                        inputs.push_back(raw_packet);
+                        for(size_t p=0; p<port_map_.size(); ++p) {
+                            if(port_map_[p].method_id == method_id && port_map_[p].arg_index == static_cast<int>(i)) {
+                                selected_port = static_cast<int>(p);
+                                break;
+                            }
+                        }
                     }
-                    // Consume the input packet immediately
-                    port_buffers_[idx].pop_front();
+                    
+                    for(int p_idx : discarded_ports) {
+                        if(p_idx >= 0 && p_idx < port_buffers_.size() && !port_buffers_[p_idx].empty()) {
+                            port_buffers_[p_idx].pop_front();
+                        }
+                    }
+                    
+                    if (selected_port != -1 && selected_port < port_buffers_.size() && !port_buffers_[selected_port].empty()) {
+                        Packet pkt = port_buffers_[selected_port].front();
+                        port_buffers_[selected_port].pop_front();
+                        
+                        if(port_converters_.count(selected_port)) {
+                            inputs.push_back(port_converters_[selected_port](pkt));
+                        } else {
+                            inputs.push_back(std::move(pkt));
+                        }
+                    } else {
+                        method_ready = false;
+                        break;
+                    }
                 }
-
+                
+                if (!method_ready) continue;
+                
+                for(size_t i=0; i<required_args; ++i) {
+                     if (mux_configs_[method_id].count(i)) {
+                         int c_idx = FindControlPortIndex(mux_configs_[method_id][i].control_node);
+                         if(c_idx != -1 && !popped_controls.count(c_idx) && !port_buffers_[c_idx].empty()) {
+                             port_buffers_[c_idx].pop_front();
+                             popped_controls.insert(c_idx);
+                         }
+                     }
+                }
+                
                 // Invoke
                 Packet result = it->second.invoker(this, inputs);
 
-                // Output handling
-                // We treat any non-empty result as the node's output for this cycle.
-                // Usually only 'forward' returns data. Control methods return void (Empty Packet).
                 if (result.has_value()) {
-                    // Propagate timestamp if needed
                     if (result.timestamp == 0) {
                         if (!inputs.empty()) {
-                             result.timestamp = inputs[0].timestamp; // Inherit from first arg
+                             result.timestamp = inputs[0].timestamp;
                         } else {
-                             // Source generation or 0-arg method: use current time
                              result.timestamp = Packet::NowNs();
                         }
                     }
@@ -739,8 +797,6 @@ protected:
             output_packet_ = Packet::Empty();
         }
     }
-
-    std::unordered_map<size_t, std::vector<AnyCaster>> input_converters_;
 };
 
 // ========== SyncBarrier ==========

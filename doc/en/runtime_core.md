@@ -51,3 +51,9 @@ Data is exchanged using `Packet` objects, which serve as a universal container.
 - **std::any Payload**: Stores the actual data in a type-safe, type-erased manner.
 - **Shared Ownership**: Uses `std::shared_ptr` to allow zero-copy fan-out to multiple downstream nodes.
 - **Timestamp**: Carries a nanosecond-level timestamp for synchronization.
+
+## 5. Graph Construction Constraints
+
+- **IfNode condition types**: Conditions must output `bool` or `int` (including int64). Invalid types are rejected during graph construction.
+- **Mux control types**: Control packets must be `bool` or `int`; unmapped control values are treated as errors.
+- **Repeated runs**: The Taskflow graph is reset between runs, but node-level state is user-controlled; nodes should be written to handle re-entry if reused across runs.

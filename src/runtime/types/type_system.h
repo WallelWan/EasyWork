@@ -10,6 +10,7 @@
 #include <cstring>
 #include <type_traits>
 #include <memory>
+#include <tuple>
 #include <stdexcept>
 #include <utility>
 #include <algorithm>
@@ -30,6 +31,16 @@
 #endif
 
 namespace easywork {
+
+template<typename TupleT>
+bool RegisterTupleType();
+
+namespace detail {
+template <typename T> struct is_tuple_impl : std::false_type {};
+template <typename... Ts> struct is_tuple_impl<std::tuple<Ts...>> : std::true_type {};
+template <typename T> struct is_tuple : is_tuple_impl<std::decay_t<T>> {};
+template <typename T> inline constexpr bool is_tuple_v = is_tuple<T>::value;
+} // namespace detail
 
 // ========== Demangling ==========
 
@@ -173,6 +184,9 @@ inline void RegisterMethodTypes(Ret (Derived::*)(Args...)) {
     if constexpr (!std::is_void_v<Ret>) {
         RegisterTypeUsage<std::decay_t<Ret>>();
         RegisterPythonType<std::decay_t<Ret>>();
+        if constexpr (detail::is_tuple_v<Ret>) {
+            RegisterTupleType<std::decay_t<Ret>>();
+        }
     }
 }
 

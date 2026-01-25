@@ -24,4 +24,5 @@
  *   #include "modules/example_typed_nodes.h"  // Include specific module
  */
 
+#include "control_nodes.h"
 #include "example_typed_nodes.h"

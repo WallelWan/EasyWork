@@ -63,3 +63,7 @@ node = MyNode(2)
 node = MyNode(factor=2)
 node = MyNode() # uses default 1
 ```
+
+### Argument Validation
+
+Argument parsing is strict: invalid argument types raise an error instead of silently falling back to defaults. This surfaces configuration bugs early during graph construction.

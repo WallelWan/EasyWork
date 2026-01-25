@@ -47,30 +47,6 @@ void RegisterMethodTypes(Ret (Derived::*)(Args...));
 #define EW_PAIR_METHOD_ENTRY(x) { easywork::hash_string(#x), &Self::x },
 
 // =========================================================================
-// Main Export Macro
-// =========================================================================
-
-/**
- * @brief Automatically generates exposed_methods() and method_table()
- * 
- * Usage:
- *   class MyNode : public TypedFunctionNode<MyNode, ...> {
- *       ...
- *       EW_EXPORT_METHODS(left, right)
- *   };
- */
-#define EW_EXPORT_METHODS(...) \
-    std::vector<std::string> exposed_methods() const override { \
-        return { "forward", EW_FOR_EACH(EW_STRINGIFY_METHOD, __VA_ARGS__) }; \
-    } \
-    \
-    static std::unordered_map<size_t, MethodSignature> method_table() { \
-        return { \
-            EW_FOR_EACH(EW_PAIR_METHOD_ENTRY, __VA_ARGS__) \
-        }; \
-    }
-
-// =========================================================================
 // New Heterogeneous Registration (Phase 2+)
 // =========================================================================
 

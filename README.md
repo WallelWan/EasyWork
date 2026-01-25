@@ -1,193 +1,36 @@
-# EasyWork Project Documentation
+# EasyWork
 
-## 1. Project Overview
+EasyWork is a C++20 + Python runtime for building heterogeneous, type-safe computation graphs. It uses Taskflow for static scheduling, exposes nodes to Python via pybind11, and provides a mixed eager/tracing API for fast prototyping and validation.
 
-EasyWork is a computational graph execution framework based on Taskflow static scheduling. It is designed to provide high-performance, type-safe, and easily extensible capabilities for building heterogeneous computation flows.
+## Highlights
 
-Key Features:
-- **C++ Runtime**: High-performance node system and scheduling engine, implementing static graph scheduling based on Taskflow.
-- **Python API**: Concise data flow graph construction interface supporting type checking and automatic topology building.
-- **Type System**: `Packet` with `std::any` payload + `TypeInfo` reflection, connect-time checks, and precompiled casting.
-- **Heterogeneous Method Support**: Nodes support multiple input/control methods with different signatures (C++20 reflection mechanism).
-- **Extensibility**: Easily register new nodes via C++20 factory patterns and macros.
+- **Static scheduling with Taskflow**: Build once, execute repeatedly with low runtime overhead.
+- **Heterogeneous methods**: A node can expose multiple methods with different signatures.
+- **Type-checked connections**: Connect-time checks with precompiled converters.
+- **Python-first workflow**: Eager execution outside pipelines; tracing inside pipelines.
+- **Zero-copy data support**: `Packet` uses `std::any` + shared ownership; `FrameBuffer` supports Python buffer protocol.
+- **AST control flow (strict)**: Native `if/else` in `construct()` with compile-time graph checks.
 
-## 2. Project Structure
+## Quick Start
 
-```
-prototype/
-├── src/                      # C++ Source Code
-│   ├── runtime/              # Runtime Core
-│   │   ├── core/             # Execution engine, dispatch
-│   │   │   ├── core.h
-│   │   │   └── dispatch_unit.h
-│   │   ├── types/            # Type system + converters
-│   │   │   ├── type_system.h
-│   │   │   ├── type_converter.h
-│   │   │   └── type_traits.h
-│   │   ├── registry/         # Node registry + macros
-│   │   │   ├── node_registry.h
-│   │   │   └── macros.h
-│   │   └── memory/           # Memory Management
-│   │       └── frame.h       # FrameBuffer Data Structure (Python Buffer Protocol)
-│   ├── modules/              # Node modules (moved out of runtime)
-│   │   ├── module_registry.h
-│   │   └── example_typed_nodes.h
-│   └── bindings/             # Python Bindings
-│       └── bindings.cpp      # Pybind11 Binding Code
-├── python/                   # Python Package
-│   └── easywork/
-│       ├── __init__.py       # Main API (Pipeline, NodeWrapper)
-│       └── *.so              # Compiled C++ Extension
-├── tests/                    # Test Files
-├── extern/                   # External Dependencies (Taskflow, etc.)
-└── CMakeLists.txt            # Build Configuration
+### Build
+
+Requirements:
+
+- C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
+- CMake 3.15+
+- OpenCV (required)
+- Python 3.8+
+
+```bash
+mkdir build
+cmake -S . -B build
+cmake --build build
 ```
 
-## 3. Architecture and Execution Model
+The Python extension `easywork_core` is emitted to `python/easywork`.
 
-### 3.1 Scheduling Engine: Taskflow
-
-The project uses **Taskflow** as the underlying scheduling engine:
-- **Static Graph Optimization**: The Taskflow graph is built once during `Pipeline.run()`, resulting in extremely low runtime scheduling overhead.
-- **Concurrent Execution**: Utilizing Taskflow's `executor` to automatically manage thread pools and task dependencies.
-
-### 3.2 Node Lifecycle
-
-Each node inherits from `BaseNode` and has a complete lifecycle:
-1. **Build**: Creates a `tf::Task` in the Taskflow graph.
-2. **Connect**: Establishes `precede/succeed` dependency relationships between tasks.
-3. **Activate**: Activates the node (e.g., Source node prepares data).
-4. **Open(args, kwargs)**: Resource initialization (user-overridable).
-5. **Process**: Data processing loop (automatically scheduled via `RunDispatch` by the framework).
-6. **Close()**: Resource release (user-overridable).
-
-### 3.3 Four-Stage Execution Flow (Pipeline.run)
-
-The Python side `Pipeline.run()` automates the following process:
-1. **Reset & Trace**: Clears old connection states and executes the user-defined `construct()` to determine node connection topology.
-2. **Build**: Instantiates C++ node tasks within the Taskflow graph.
-3. **Connect**: Establishes dependency edges between Taskflow tasks.
-4. **Execute**: Starts the Taskflow Executor to run the computation graph.
-
-> Note: `Pipeline.validate()` is an independent, optional step used for static type checking before execution.
-
-### 3.4 Scheduling and Buffer Control
-
-Each node supports fine-grained input method scheduling configuration:
-
-- **Method Ordering**: Customize the check order of input ports via `set_method_order(["left", "right", "forward"])`. Default is `forward` executed last.
-- **Input Synchronization**: Enable timestamp alignment via `set_method_sync(method, True)`. The method triggers only when all input ports have data with the same timestamp.
-- **FIFO Buffering**: Limit input buffer length via `set_method_queue_size(method, size)`.
-
-## 4. Type System and Data Flow
-
-### 4.1 TypeInfo and Type Safety
-
-The framework generates `TypeInfo` using C++ RTTI and template metaprogramming. `Pipeline.validate()` on the Python side queries C++ node metadata (MethodMeta) to check if upstream output types strictly match downstream input parameter types.
-
-### 4.2 Packet and Timestamps
-
-Data is passed between nodes as `Packet` objects:
-- **Payload**: `std::shared_ptr<std::any>` storing typed data with zero-copy fan-out.
-- **Timestamp**: Nanosecond-level timestamp, used for synchronization mechanisms like `SyncBarrier`.
-
-### 4.3 Automatic Tuple Handling
-
-- **C++ Side**: Use `RegisterTupleType<std::tuple<...>>()` to register Tuple types.
-- **Python Side**: Supports native unpacking `a, b = node.read()`. The framework automatically inserts `TupleGetNode` to implement splitting without extra coding.
-
-### 4.4 Automatic Type Conversion
-
-EasyWork builds conversion tables from C++ method signatures at registration time. Python inputs are converted via registered `pybind11::cast<T>()`, and node-to-node conversions are precompiled at connect time.
-
-- **No Manual Type Lists**: Supported types are derived from C++ method and constructor signatures.
-- **Precompiled Casts**: Connections inject deterministic converters (`AnyCaster`) for arithmetic promotion.
-- **Custom Objects**: Any C++ class registered via `pybind11` is eligible once used in a method signature.
-
-**Example: Passing a List to C++ Vector**
-
-C++ Definition:
-```cpp
-class VectorSum : public BaseNode<VectorSum> {
-public:
-    int forward(std::vector<int> vec) {
-        return std::accumulate(vec.begin(), vec.end(), 0);
-    }
-    EW_ENABLE_METHODS(forward)
-};
-```
-
-Python Call:
-```python
-node = ew.module.VectorSum()
-# Python list [1, 2, 3] is automatically converted to std::vector<int>
-result = node([1, 2, 3]) 
-print(result) # Output: 6
-```
-
-## 5. C++ Node Development
-
-### 5.1 Defining Nodes (New Syntax)
-
-Inherit from `BaseNode<Derived>`. Generic parameters for input/output types are no longer needed. Use the `EW_ENABLE_METHODS` macro to automatically export methods and generate reflection information.
-
-```cpp
-#include "runtime/core/core.h"
-#include "runtime/registry/node_registry.h"
-
-using namespace easywork;
-
-class MyMathNode : public BaseNode<MyMathNode> {
-public:
-    // Method 1: Main processing logic (int -> int)
-    int forward(int input) {
-        return input * 2;
-    }
-
-    // Method 2: Configuration method (float -> void)
-    void set_scale(float scale) {
-        // ... update internal state
-    }
-
-    // Must explicitly export all methods to be exposed to Python
-    EW_ENABLE_METHODS(forward, set_scale)
-};
-```
-
-### 5.2 Heterogeneous Method Support
-
-Nodes can contain multiple methods with completely different signatures. The framework automatically handles parameter unpacking and type conversion:
-- `forward(Image img)`
-- `config(std::string key, int value)`
-- `reset()`
-
-The framework automatically generates invoker glue code to convert `std::vector<Packet>` into native C++ parameters and call the corresponding method.
-
-### 5.3 Dynamic Registration
-
-Use the `EW_REGISTER_NODE` macro to register the node so it can be created in Python. Supports defining constructor arguments (parameter names and default values).
-
-```cpp
-// Register MyMathNode with name "MyMath", no arguments
-EW_REGISTER_NODE(MyMathNode, "MyMath")
-
-// Register a node with arguments
-class Scaler : public BaseNode<Scaler> {
-public:
-    Scaler(int factor) : factor_(factor) {}
-    int forward(int x) { return x * factor_; }
-    EW_ENABLE_METHODS(forward)
-private:
-    int factor_;
-};
-
-// Register specifying argument name "factor" and default value 1
-EW_REGISTER_NODE(Scaler, "Scaler", Arg("factor", 1))
-```
-
-## 6. Python API Manual
-
-### 6.1 Defining a Pipeline
+### Python usage
 
 ```python
 import easywork as ew
@@ -195,105 +38,121 @@ import easywork as ew
 class MyPipeline(ew.Pipeline):
     def __init__(self):
         super().__init__()
-        self.src = ew.module.NumberSource(start=0, max=10)
-        self.scale = ew.module.MultiplyBy(factor=2)
+        self.src = ew.module.NumberSource(start=0, max=3)
+        self.mul = ew.module.MultiplyBy(factor=2)
         self.to_text = ew.module.IntToText()
         self.prefix = ew.module.PrefixText(prefix="[Value] ")
-        self.mixed = ew.module.MixedNode()
 
     def construct(self):
-        # Default connection to forward method
-        scaled = self.scale(self.src())
-        text = self.to_text(scaled)
-        prefixed = self.prefix(text)
+        value = self.src.read()
+        text = self.to_text(self.mul(value))
+        self.prefix(text)
 
-        # Connection to a specific method
-        self.mixed.set_string(prefixed)
-
-        # Chained connection to forward
-        self.mixed(scaled)
-```
-
-### 6.2 Running and Monitoring
-
-`Pipeline.run()` is highly robust; it automatically cleans up old states and rebuilds the topology before each run.
-
-```python
 pipeline = MyPipeline()
-pipeline.open()
-
-# Optional: Perform static type checking
-# pipeline.validate() 
-
-# Automatically builds topology and executes
-# Safe to call multiple times; state is reset each time to ensure no side effects
-pipeline.run() 
-
+pipeline.validate()  # optional but recommended
+pipeline.open()      # required before run()
+pipeline.run()
 pipeline.close()
 ```
 
-### 6.3 Performance Monitoring Interface
-
-- `ew.get_method_dispatch_counts()`: Get method dispatch statistics (left/right/forward counts).
-- `ew.get_method_dispatch_order_errors()`: Get count of dispatch order violations (for `set_method_order` debugging).
-- `ew.get_small_tracked_live_count()`: Monitor object lifecycle (SBO optimization testing).
-
-### 6.4 Immediate Execution vs Graph Construction (Eager vs Tracing)
-
-EasyWork supports two operation modes, switching automatically based on context:
-
-1.  **Eager Mode**: Outside of a Pipeline context, calling node methods executes the corresponding C++ function immediately and returns the result. Useful for debugging and unit testing.
-2.  **Tracing Mode**: Within `construct()` or a `with pipeline:` block, calling node methods records the topology connection and returns a `Symbol`.
+### Eager mode (no pipeline context)
 
 ```python
-import easywork as ew
-
-multiplier = ew.module.MultiplyBy(factor=3)
-
-# --- Eager Mode (Direct Execution) ---
-# Executes C++ logic directly, returns the result
-result = multiplier(10) 
-print(f"Result: {result}")  # Output: 30
-
-# --- Tracing Mode (Graph Construction) ---
-pipeline = ew.Pipeline()
-with pipeline:
-    # Explicitly enter tracing mode
-    src = ew.module.NumberSource(start=1, max=5)
-    # Returns a Symbol instead of a value
-    symbol = multiplier(src.read())
-    
-pipeline.run()
+multiplier = ew.module.MultiplyBy(factor=5)
+result = multiplier(10)  # executes immediately, returns int
 ```
 
-## 7. Advanced Features
+## Execution Model
 
-### 7.1 SyncBarrier (C++ Only)
+- **Eager mode**: Calling a node outside a pipeline executes immediately and returns a Python value.
+- **Tracing mode**: Inside `Pipeline.construct()` or `with pipeline:` blocks, node calls return `Symbol` objects and build graph connections.
+- **Run lifecycle**: `validate()` builds topology and checks types; `run()` builds Taskflow tasks, connects edges, and executes; repeated `run()` resets the graph internally.
+- **Open/close**: Nodes must be opened before `run()`. `Node.open()`/`Node.close()` only accept positional args (no kwargs) and enforce argument counts.
 
-`SyncBarrier` is a special built-in node for multi-channel input timestamp alignment. It buffers inputs from multiple ports until a set of data within the timestamp tolerance is found, packaging them into a Tuple output. Currently, this node is only available for C++ graph construction.
+## Type System & Conversion
+
+- **TypeInfo**: Lightweight wrapper around `std::type_info` with demangled names.
+- **Packet**: `std::any` payload + timestamp; empty packets represent void.
+- **Converters**: Connection-time conversion uses `TypeConverterRegistry` with registered arithmetic promotions and Python converters (via pybind11).
+- **Tuple support**: Tuple return types are auto-registered for Python unpacking.
+- **Mux safety**: All inputs wired via `MuxSymbol` must share the same type, and a given input index cannot mix mux and direct connections.
+
+## Validation Notes
+
+- **IfNode conditions**: `if` conditions in `construct()` must be `bool` or `int` (including int64). Invalid types fail at graph construction.
+- **Mux control type**: `MuxSymbol` control input must output `bool`/`int`; mismatched types are rejected during graph construction.
+- **Type validation**: Validation accepts exact matches and registered converters; if the core extension does not expose converters, validation is strict.
+- **NumberSource step**: `step` must be a non-zero integer; invalid values raise at node creation.
+
+## C++ Node Development
+
+Define nodes by inheriting `BaseNode<T>`, exporting methods with `EW_ENABLE_METHODS`, and registering with `EW_REGISTER_NODE`.
 
 ```cpp
-// Usage on C++ side
-auto barrier = std::make_shared<SyncBarrier<int, float>>(1000000); // 1ms tolerance
+#include "runtime/core/core.h"
+#include "runtime/registry/node_registry.h"
+#include "runtime/registry/macros.h"
+
+class Scaler : public easywork::BaseNode<Scaler> {
+public:
+    explicit Scaler(int factor) : factor_(factor) {}
+
+    int forward(int x) { return x * factor_; }
+    void reset() { factor_ = 1; }
+
+    EW_ENABLE_METHODS(forward, reset)
+
+private:
+    int factor_{1};
+};
+
+EW_REGISTER_NODE(Scaler, "Scaler", easywork::Arg("factor", 1))
 ```
 
-### 7.2 Zero-Copy FrameBuffer
+Notes:
 
-Provides a `FrameBuffer` structure supporting the Python Buffer Protocol. Images can be processed in C++ via OpenCV, and the data pointer is directly exposed to Python (NumPy), avoiding memory copies.
+- Each method signature is reflected and type-checked at connect time.
+- `void` methods return empty packets; they cannot be wired into consumers expecting data.
+- Methods can be prioritized and synchronized via `set_method_order`, `set_method_sync`, and `set_method_queue_size`.
 
-## 8. Build and Environment
+## Project Layout
 
-- **Compiler**: Supports C++20 (GCC 10+, Clang 12+)
-- **Dependencies**: Taskflow, OpenCV (optional), pybind11
-- **Build**:
-  ```bash
-  mkdir build && cd build
-  cmake ..
-  make
-  ```
+```
+src/
+  runtime/
+    core/            # ExecutionGraph, Node, dispatch logic
+    types/           # TypeInfo, Packet, converters
+    registry/        # NodeRegistry, macros
+    memory/          # FrameBuffer
+  modules/           # Example nodes (registered for Python)
+  bindings/          # pybind11 bindings
+python/
+  easywork/          # Python API + extension module
+tests/               # Pytest-based tests
+doc/                 # Detailed runtime docs
+extern/              # Taskflow (header-only)
+CMakeLists.txt
+```
 
-## 9. Future Roadmap
+## Tests
 
-- **AST Parsing & Native Control Flow**: Implement AST analysis (similar to Numba/Triton) to support native Python `if/else`, `for/while` syntax within graph construction, replacing the need for specialized flow control nodes.
-- **Distributed Execution**: Extend Taskflow integration to support distributed graph execution across multiple nodes.
-- **Enhanced Visualization**: Provide tools to visualize the generated execution graph for easier debugging and optimization.
+```bash
+PYTHONPATH=python python -m pytest tests
+```
+
+## Documentation
+
+- `doc/en/runtime_core.md`
+- `doc/en/runtime_types.md`
+- `doc/en/runtime_registry.md`
+- `doc/en/ast_control_flow_design.md`
+- `doc/cn/runtime_core_cn.md`
+- `doc/cn/runtime_types_cn.md`
+- `doc/cn/runtime_registry_cn.md`
+- `doc/cn/ast_control_flow_design_cn.md`
+
+## Roadmap
+
+- AST-driven control flow for `for/while`.
+- Distributed execution on multi-node backends.
+- Graph visualization tools for debugging and profiling.

@@ -1,11 +1,6 @@
 
-import sys
-import os
 import pytest
 import easywork as ew
-
-# Ensure we can import the module if running directly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 def test_heterogeneous_methods_connection():
     """Test connecting nodes to different methods with different signatures."""
@@ -91,4 +86,3 @@ def test_void_return_connection():
         pipeline.validate()
         
     assert "Type mismatch" in str(excinfo.value)
-

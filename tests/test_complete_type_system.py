@@ -3,12 +3,7 @@
 测试类型化节点、类型检查、Python 端集成
 """
 
-import sys
-import os
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
-
 import easywork as ew
 
 
@@ -107,6 +102,11 @@ def test_module_dynamic_access():
         _ = ew.module.NonExistentNode
 
 
+def test_invalid_node_args_raise():
+    with pytest.raises(RuntimeError):
+        _ = ew.module.NumberSource(start=0, max=5, step="bad")
+
+
 # ========== 测试 6：Tuple 自动索引与多输入 ==========
 
 def test_tuple_auto_index_and_multi_input():
@@ -132,7 +132,33 @@ def test_tuple_auto_index_and_multi_input():
     pipeline.close()
 
 
-# ========== 测试 7：Small Buffer 析构安全 ==========
+def test_mux_control_type_error_construct():
+    pipeline = ew.Pipeline()
+    source = ew.module.NumberSource(0, 1, 1)
+    control = ew.module.IntToText()
+    left = ew.module.MultiplyBy(2)
+    right = ew.module.MultiplyBy(3)
+    sink = ew.module.MultiplyBy(1)
+
+    with pytest.raises(TypeError):
+        with pipeline:
+            value = source.read()
+            control(value)
+            mux = ew.MuxSymbol(control, {0: left(value), 1: right(value)})
+            sink(mux)
+
+
+# ========== 测试 7：Tuple 自动注册 ==========
+
+def test_tuple_auto_registration():
+    """测试 tuple 返回类型自动注册"""
+    emitter = ew.module.PairEmitter(start=1, max=1)
+    type_info = emitter.raw.type_info
+    output_type = type_info.methods[ew._core.ID_FORWARD].output_type
+    assert ew._core.get_tuple_size(output_type) == 2
+
+
+# ========== 测试 8：Small Buffer 析构安全 ==========
 
 def test_small_buffer_safety():
     """测试 SBO 析构是否正确释放小类型"""
@@ -191,6 +217,28 @@ def test_method_dispatch():
     assert right_count == 3
     assert forward_count == 3
     assert order_errors == 0
+
+
+def test_number_source_step_skip():
+    class StepPipeline(ew.Pipeline):
+        def __init__(self):
+            super().__init__()
+            self.source = ew.module.NumberSource(start=0, max=3, step=2)
+            self.recorder = ew.module.MethodDispatchRecorder()
+
+        def construct(self):
+            value = self.source.read()
+            self.recorder(value)
+
+    ew._core.reset_method_dispatch_counts()
+    pipeline = StepPipeline()
+    pipeline.validate()
+    pipeline.open()
+    pipeline.run()
+    pipeline.close()
+
+    _, _, forward_count = ew._core.get_method_dispatch_counts()
+    assert forward_count == 2
 
 
 # ========== 测试 9：Open/Close 参数与运行检查 ==========

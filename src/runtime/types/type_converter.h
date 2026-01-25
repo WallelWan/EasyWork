@@ -101,12 +101,16 @@ inline void RegisterArithmeticConversions() {
     static AutoRegistrar<int, double> reg_int_double;
     static AutoRegistrar<int, float> reg_int_float;
     static AutoRegistrar<int, int64_t> reg_int_int64;
+    static AutoRegistrar<int, bool> reg_int_bool;
     static AutoRegistrar<int64_t, double> reg_int64_double;
     static AutoRegistrar<int64_t, float> reg_int64_float;
     static AutoRegistrar<int64_t, int> reg_int64_int;
+    static AutoRegistrar<int64_t, bool> reg_int64_bool;
     static AutoRegistrar<float, double> reg_float_double;
+    static AutoRegistrar<float, bool> reg_float_bool;
     static AutoRegistrar<double, float> reg_double_float;
     static AutoRegistrar<double, int64_t> reg_double_int64;
+    static AutoRegistrar<double, bool> reg_double_bool;
 }
 
 } // namespace easywork
