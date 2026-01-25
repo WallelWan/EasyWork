@@ -23,7 +23,6 @@
 #include <limits>
 #include "runtime/memory/frame.h"
 #include "runtime/types/type_system.h"
-#include "dispatch_unit.h"
 #include "runtime/types/type_converter.h"
 #include "runtime/registry/macros.h"
 
@@ -69,74 +68,6 @@ struct FlowControl {
         if (graph) graph->keep_running = false;
     }
 };
-
-// ========== Context ==========
-
-/**
- * @brief Provides execution context for legacy or special nodes.
- * 
- * Allows access to all inputs and management of multiple outputs dynamically.
- * Mostly used for nodes that need direct access to the raw Packet or timestamp data.
- */
-class Context {
-public:
-    Context(std::vector<Packet> inputs, int64_t input_timestamp)
-        : inputs_(std::move(inputs)), input_timestamp_(input_timestamp) {}
-
-    /// Retrieve input packet at specific index.
-    const Packet& Input(size_t index) const {
-        if (index >= inputs_.size()) {
-            throw std::out_of_range("Context input index out of range");
-        }
-        return inputs_[index];
-    }
-
-    /// Set output packet at specific index.
-    void Output(size_t index, Packet packet) {
-        if (outputs_.size() <= index) {
-            outputs_.resize(index + 1);
-        }
-        outputs_[index] = std::move(packet);
-    }
-
-    /// Retrieve and consume output packet at specific index.
-    Packet TakeOutput(size_t index) {
-        if (index >= outputs_.size()) {
-            return Packet::Empty();
-        }
-        Packet packet = std::move(outputs_[index]);
-        outputs_[index] = Packet::Empty();
-        return packet;
-    }
-
-    bool HasOutput(size_t index) const {
-        return index < outputs_.size() && outputs_[index].has_value();
-    }
-
-    int64_t InputTimestamp() const {
-        return input_timestamp_;
-    }
-
-private:
-    std::vector<Packet> inputs_;
-    std::vector<Packet> outputs_;
-    int64_t input_timestamp_{0};
-};
-
-// ========== Method Tagged Value (Optimized) ==========
-
-struct MethodTaggedValue {
-    size_t method_id;
-    Packet payload;
-};
-
-inline bool IsTaggedValue(const Packet& packet) {
-    return packet.has_value() && packet.type() == TypeInfo::create<MethodTaggedValue>();
-}
-
-inline MethodTaggedValue AsTaggedValue(const Packet& packet) {
-    return packet.cast<MethodTaggedValue>();
-}
 
 // ========== Heterogeneous Method Dispatch (New Architecture) ==========
 
@@ -251,7 +182,6 @@ public:
 
     std::vector<UpstreamConnection> upstreams_;
     std::vector<PortInfo> port_map_;
-    std::vector<std::string> upstream_methods_debug_; 
     std::vector<std::deque<Packet>> port_buffers_;
     std::unordered_map<size_t, MethodConfig> method_configs_;
     std::vector<size_t> method_order_;
@@ -275,7 +205,6 @@ public:
 
         upstreams_.push_back({n, id, weak});
         port_map_.push_back({index, id, actual_arg_idx, id != ID_FORWARD});
-        upstream_methods_debug_.push_back(std::move(method));
         port_buffers_.emplace_back();
         if (!method_order_customized_) {
             RegisterMethodOrder(id);
@@ -286,14 +215,12 @@ public:
         size_t index = upstreams_.size();
         upstreams_.push_back({n, 0});
         port_map_.push_back({index, 0, -1, true});
-        upstream_methods_debug_.push_back("CONTROL");
         port_buffers_.emplace_back();
     }
 
     void ClearUpstreams() {
         upstreams_.clear();
         port_map_.clear();
-        upstream_methods_debug_.clear();
         port_buffers_.clear();
         mux_configs_.clear();
         port_converters_.clear();
@@ -531,15 +458,6 @@ inline constexpr bool has_method_table_v = requires {
     { Derived::method_table() } -> std::same_as<MethodTable>;
 };
 
-template<typename T, typename = void>
-struct has_context_forward : std::false_type {};
-
-template<typename T>
-struct has_context_forward<T, std::void_t<decltype(std::declval<T>().forward(static_cast<Context*>(nullptr)))>>
-    : std::bool_constant<std::is_same_v<decltype(std::declval<T>().forward(static_cast<Context*>(nullptr))), void>> {};
-
-template<typename T>
-inline constexpr bool has_context_forward_v = has_context_forward<T>::value;
 } // namespace detail
 
 // Forward declaration
@@ -800,125 +718,7 @@ protected:
 };
 
 // ========== SyncBarrier ==========
-// (SyncBarrier remains mostly unchanged, but inherits Node directly)
-
-template<typename... InputTs>
-class SyncBarrier : public Node {
-public:
-    using OutputTuple = std::tuple<InputTs...>;
-
-    explicit SyncBarrier(int64_t tolerance_ns = 0)
-        : tolerance_ns_(tolerance_ns), buffers_(sizeof...(InputTs)) {}
-
-    void build(ExecutionGraph& g) override {
-        task_ = g.taskflow.emplace([this]() {
-            try {
-                BufferInputs();
-                AlignAndEmit();
-            } catch (const std::exception& e) {
-                std::cerr << "Error in sync barrier: " << e.what() << std::endl;
-                output_packet_ = Packet::Empty();
-            }
-        });
-        task_.name("SyncBarrier");
-    }
-
-    void connect() override {
-        for (const auto& conn : upstreams_) {
-            if (conn.node) {
-                conn.node->get_task().precede(task_);
-            }
-        }
-    }
-
-    NodeTypeInfo get_type_info() const override {
-        // SyncBarrier behaves like a generic node with 1 method (implicit forward)
-        NodeTypeInfo info;
-        MethodInfo method;
-        method.input_types = {TypeInfo::create<InputTs>()...};
-        method.output_type = TypeInfo::create<OutputTuple>();
-        info.methods[ID_FORWARD] = method;
-        return info;
-    }
-
-private:
-    int64_t tolerance_ns_;
-    std::vector<std::deque<Packet>> buffers_;
-
-    void BufferInputs() {
-        for (size_t i = 0; i < buffers_.size() && i < upstreams_.size(); ++i) {
-            if (!upstreams_[i].node) {
-                continue;
-            }
-            Packet packet = upstreams_[i].node->output_packet_;
-            if (!packet.has_value()) {
-                continue;
-            }
-            buffers_[i].push_back(std::move(packet));
-        }
-    }
-
-    bool BuffersReady() const {
-        if (buffers_.empty()) {
-            return false;
-        }
-        return std::all_of(buffers_.begin(), buffers_.end(), [](const auto& buffer) {
-            return !buffer.empty();
-        });
-    }
-
-    int64_t MinTimestamp() const {
-        int64_t min_ts = std::numeric_limits<int64_t>::max();
-        for (const auto& buffer : buffers_) {
-            min_ts = std::min(min_ts, buffer.front().timestamp);
-        }
-        return min_ts == std::numeric_limits<int64_t>::max() ? 0 : min_ts;
-    }
-
-    int64_t MaxTimestamp() const {
-        int64_t max_ts = 0;
-        for (const auto& buffer : buffers_) {
-            max_ts = std::max(max_ts, buffer.front().timestamp);
-        }
-        return max_ts;
-    }
-
-    void DropEarlier(int64_t min_ts) {
-        for (auto& buffer : buffers_) {
-            if (!buffer.empty() && buffer.front().timestamp == min_ts) {
-                buffer.pop_front();
-            }
-        }
-    }
-
-    template<size_t... Index>
-    OutputTuple BuildOutput(std::index_sequence<Index...>) {
-        return std::make_tuple(buffers_[Index].front().template cast<InputTs>()...);
-    }
-
-    void PopAligned() {
-        for (auto& buffer : buffers_) {
-            if (!buffer.empty()) {
-                buffer.pop_front();
-            }
-        }
-    }
-
-    void AlignAndEmit() {
-        while (BuffersReady()) {
-            int64_t min_ts = MinTimestamp();
-            int64_t max_ts = MaxTimestamp();
-            if (max_ts - min_ts <= tolerance_ns_) {
-                OutputTuple output = BuildOutput(std::index_sequence_for<InputTs...>{});
-                PopAligned();
-                output_packet_ = Packet::From(std::move(output), max_ts);
-                return;
-            }
-            DropEarlier(min_ts);
-        }
-        output_packet_ = Packet::Empty();
-    }
-};
+// (SyncBarrier removed as it was unused and potentially unsafe)
 
 // ========== TupleGetNode ==========
 

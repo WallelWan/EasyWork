@@ -270,4 +270,15 @@ private:
 
 EW_REGISTER_NODE(MixedNode, "MixedNode")
 
+class EvenCheck : public BaseNode<EvenCheck> {
+public:
+    bool forward(int input) {
+        return (input % 2) == 0;
+    }
+
+    EW_ENABLE_METHODS(forward)
+};
+
+EW_REGISTER_NODE(EvenCheck, "EvenCheck")
+
 } // namespace easywork

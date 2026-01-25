@@ -11,7 +11,7 @@
 
 - Mux 控制信号仅支持 bool/int，其他类型会静默落入默认分支，未抛错。
 - Mux 丢弃逻辑直接 pop 其他分支队列，控制信号快速切换时可能丢弃错配数据。
-- SyncBarrier 缓冲模型独立于 BaseNode，复杂拓扑下可能出现行为不一致。
+- (Fixed) SyncBarrier removed due to complexity and redundancy.
 
 ## 类型系统与转换
 
@@ -31,7 +31,7 @@
 
 - AST 允许嵌套 if，但 BranchCtx 禁止嵌套分支上下文，可能触发运行时异常。
 - if 条件类型未在构图期校验，运行时仅支持 bool/int，其他类型可能静默走 false。
-- MergeNode 仅取第一个非空包，缺少按时间戳或控制信号的合并策略，可能丢数据。
+- (Fixed) MergeNode logic replaced by Input Multiplexing (`SetInputMux`).
 
 ## 控制节点与示例节点
 

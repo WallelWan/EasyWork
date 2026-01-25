@@ -121,8 +121,8 @@ namespace detail {
     // Entry point: Takes variadic Args, packs them into a tuple, and delegates
     template<typename NodeT, typename... Args>
     std::shared_ptr<Node> CreateNodeWithArgs(pybind11::args args, pybind11::kwargs kwargs, Args... arg_defs) {
-        TypeUsageRegistrar<std::decay_t<Args>...>::Do();
-        (RegisterPythonType<std::decay_t<Args>>(), ...);
+        TypeUsageRegistrar<typename Args::Type...>::Do();
+        (RegisterPythonType<typename Args::Type>(), ...);
         return CreateNodeWithArgsImpl<NodeT>(
             args, kwargs, std::make_index_sequence<sizeof...(Args)>{}, std::make_tuple(arg_defs...)
         );
@@ -136,6 +136,7 @@ namespace detail {
  */
 template<typename T>
 struct Arg {
+    using Type = T;
     const char* name;
     T default_val;
     Arg(const char* n, T v) : name(n), default_val(v) {}

@@ -703,8 +703,6 @@ PYBIND11_MODULE(easywork_core, m) {
         .def("add_true_branch", &easywork::IfNode::AddTrueBranch)
         .def("add_false_branch", &easywork::IfNode::AddFalseBranch);
 
-    py::class_<easywork::MergeNode, easywork::Node, std::shared_ptr<easywork::MergeNode>>(m, "MergeNode");
-
     // ========== NodeRegistry ==========
 
     py::class_<easywork::NodeRegistry>(m, "_NodeRegistry")
@@ -714,6 +712,11 @@ PYBIND11_MODULE(easywork_core, m) {
 
     m.def("create_node", [](const std::string& name, py::args args, py::kwargs kwargs) {
         return easywork::NodeRegistry::instance().Create(name, args, kwargs);
+    });
+
+    m.def("create_node_from_instance", [](py::object instance) -> std::shared_ptr<easywork::Node> {
+        py::gil_scoped_acquire gil;
+        return std::make_shared<PyNode>(instance);
     });
 
     m.def("register_python_node", [](const std::string& name, py::object py_class) {

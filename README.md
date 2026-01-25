@@ -9,7 +9,7 @@ EasyWork is a C++20 + Python runtime for building heterogeneous, type-safe compu
 - **Type-checked connections**: Connect-time checks with precompiled converters.
 - **Python-first workflow**: Eager execution outside pipelines; tracing inside pipelines.
 - **Zero-copy data support**: `Packet` uses `std::any` + shared ownership; `FrameBuffer` supports Python buffer protocol.
-- **AST control flow (strict)**: Native `if/else` in `construct()` with compile-time graph checks.
+- **AST control flow (strict)**: Native `if/else` translated to efficient mux-based routing with compile-time checks.
 
 ## Quick Start
 

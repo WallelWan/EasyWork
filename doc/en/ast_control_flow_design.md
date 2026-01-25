@@ -26,9 +26,9 @@
 ## Implementation Notes
 - Runtime branching is implemented with C++ control nodes:
   - `IfNode` creates a Taskflow condition task and routes to true/false branches.
-  - `MergeNode` merges the selected branch output back into a single stream.
+  - Input Multiplexing (`SetInputMux`) handles merging selected branch outputs back into a single stream at the consumer node.
 - The AST rewrite emits `if_` + branch contexts and injects assignments to drive
-  merge nodes automatically.
+  the multiplexing logic automatically.
 
 ## Transformation Template
 User code:

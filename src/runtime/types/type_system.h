@@ -249,4 +249,7 @@ struct Packet {
     }
 };
 
+// Type-erased converter function: takes a Packet, returns a converted Packet
+using AnyCaster = std::function<Packet(const Packet&)>;
+
 } // namespace easywork

@@ -644,33 +644,45 @@ module = ModuleProxy()
 # ========== Python Node Registration ==========
 class PythonNode:
     __ew_methods__ = ("forward",)
-    __ew_register__ = True
-    __ew_name__ = None
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        if getattr(cls, "__ew_register__", True) is False:
-            return
-        if cls is PythonNode:
-            return
-        node_name = cls.__ew_name__ or cls.__name__
-        _core.register_python_node(node_name, cls)
+    def __init__(self, *args, **kwargs):
+        pass
+    
+    @property
+    def raw(self):
+        if "_ew_cpp_node" not in self.__dict__:
+            self._ew_cpp_node = _core.create_node_from_instance(self)
+        return self._ew_cpp_node
 
+    @property
+    def _wrapper(self):
+        if "_ew_wrapper" not in self.__dict__:
+            self._ew_wrapper = NodeWrapper(self.raw)
+        return self._ew_wrapper
+        
+    def __call__(self, *args, **kwargs):
+        if _ACTIVE_PIPELINE is None:
+            return self.forward(*args, **kwargs)
+        return self._wrapper(*args, **kwargs)
+        
+    def __getattr__(self, name):
+         if name.startswith("_"):
+             raise AttributeError(name)
 
-def register_node(name=None):
-    def decorator(cls):
-        node_name = name or cls.__name__
-        cls.__ew_name__ = node_name
-        _core.register_python_node(node_name, cls)
-        return cls
+         if _ACTIVE_PIPELINE:
+             return getattr(self._wrapper, name)
+         
+         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    return decorator
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("PythonNode must implement forward()")
 
+# Remove old registration decorator
+# def register_node(name=None): ...
 
 class _PyConst(PythonNode):
     __ew_methods__ = ("forward",)
-    __ew_name__ = "_PyConst"
-
+    
     def __init__(self, value):
         self._value = value
 
@@ -679,4 +691,4 @@ class _PyConst(PythonNode):
 
 
 def _make_constant_node(value):
-    return module._PyConst(value)
+    return _PyConst(value)

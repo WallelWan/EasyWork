@@ -17,7 +17,7 @@ class PyScale(ew.PythonNode):
 
 
 def test_python_node_eager():
-    node = ew.module.PyAddOne()
+    node = PyAddOne()
     result = node(10)
     assert isinstance(result, int)
     assert result == 11
@@ -27,7 +27,7 @@ def test_python_node_pipeline():
     pipeline = ew.Pipeline()
 
     src = ew.module.NumberSource(start=1, max=1, step=1)
-    py_node = ew.module.PyAddOne()
+    py_node = PyAddOne()
     mul = ew.module.MultiplyBy(factor=2)
     sink = ew.module.IntToText()
 
@@ -44,13 +44,20 @@ def test_python_node_pipeline():
 
 
 def test_python_node_bad_arg_count():
-    node = ew.module.PyAddOne()
-    with pytest.raises(RuntimeError):
-        node(1, 2)
+    node = PyAddOne()
+    with pytest.raises(TypeError): # Eager mode raises TypeError
+         node(1, 2)
+         
+# Pipeline mode check
+    pipeline = ew.Pipeline()
+    node = PyAddOne()
+    with pytest.raises(TypeError): # NodeWrapper raises TypeError
+        with pipeline:
+             node(1, 2)
 
 
 def test_python_node_kwargs_eager():
-    node = ew.module.PyScale()
+    node = PyScale()
     result = node(3, scale=4)
     assert result == 12
 
@@ -59,7 +66,7 @@ def test_python_node_kwargs_pipeline():
     pipeline = ew.Pipeline()
 
     src = ew.module.NumberSource(start=1, max=1, step=1)
-    py_node = ew.module.PyScale()
+    py_node = PyScale()
     sink = ew.module.IntToText()
 
     with pipeline:
@@ -77,7 +84,7 @@ def test_python_node_defaults_pipeline():
     pipeline = ew.Pipeline()
 
     src = ew.module.NumberSource(start=1, max=1, step=1)
-    py_node = ew.module.PyScale()
+    py_node = PyScale()
     sink = ew.module.IntToText()
 
     with pipeline:

@@ -55,9 +55,4 @@ struct FrameBuffer {
 // Use shared_ptr to allow multiple consumers (fork graph).
 using Frame = std::shared_ptr<FrameBuffer>;
 
-/// Helper to create a new FrameBuffer.
-inline Frame make_frame(int w, int h, int type = CV_8UC3) {
-    return std::make_shared<FrameBuffer>(w, h, type);
-}
-
 } // namespace easywork

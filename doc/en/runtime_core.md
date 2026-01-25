@@ -40,10 +40,9 @@ The `RunDispatch` loop acts as the local scheduler for each node:
 1.  **Buffer Inputs**: Moves data from upstream nodes into local input buffers.
 2.  **Check Order**: Iterates through methods according to the configured priority (`method_order_`).
 3.  **Check Availability**: Verifies if enough data is available in the buffers for the method's arguments.
-4.  **Synchronization**: If enabled (`SyncBarrier` logic), checks timestamp alignment across inputs.
-5.  **Type Conversion**: Applies registered `AnyCaster` converters if the upstream type doesn't match the method argument type.
-6.  **Invoke**: Calls the `MethodInvoker`.
-7.  **Timestamping**: If the method returns a value (e.g., Source `forward`), ensures it has a valid timestamp (inheriting from inputs or generating `NowNs()`).
+4.  **Type Conversion**: Applies registered `AnyCaster` converters if the upstream type doesn't match the method argument type.
+5.  **Invoke**: Calls the `MethodInvoker`.
+6.  **Timestamping**: If the method returns a value (e.g., Source `forward`), ensures it has a valid timestamp (inheriting from inputs or generating `NowNs()`).
 
 ## 4. Packet System
 
