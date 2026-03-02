@@ -22,7 +22,6 @@
 #include <algorithm>
 #include <limits>
 #include <cstdint>
-#include "runtime/memory/frame.h"
 #include "runtime/types/type_system.h"
 #include "runtime/types/type_converter.h"
 #include "runtime/registry/macros.h"

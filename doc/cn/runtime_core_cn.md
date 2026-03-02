@@ -90,3 +90,19 @@ GraphSpec 是一个包含节点、连接、Mux 路由与方法配置的 JSON 文
 - 含 Python 节点或内部辅助节点时，导出直接失败。
 - 构造参数只支持基本 JSON 类型（bool/int/float/string）。
 - GraphSpec 不包含 Node open/close 参数。
+
+## 7. Runtime-only 构建约束
+
+runtime 路径可在无 Python/pybind11/OpenCV 的条件下构建：
+
+```bash
+cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
+cmake --build build_rt
+ctest --test-dir build_rt
+```
+
+可直接运行导出的图 JSON：
+
+```bash
+./build_rt/easywork-run --graph graph.json
+```

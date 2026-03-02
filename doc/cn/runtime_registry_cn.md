@@ -19,8 +19,9 @@ EW_REGISTER_NODE(Classname, PyName, Arg("param", default_val)...)
 
 ## 2. 节点注册单例 (Node Registry Singleton)
 
-`NodeRegistry` 是一个单例类，维护着工厂函数的映射：
-`std::unordered_map<std::string, NodeCreator> creators_;`
+`NodeRegistry` 是一个单例类，维护两套工厂映射：
+- `creators_any_`：C++ runtime 侧（`std::any` 参数）
+- `creators_`：Python 侧（`pybind11::args/kwargs`，仅启用 bindings 时）
 
 ### NodeCreator
 `NodeCreator` 是一个具有以下签名的函数：
@@ -79,3 +80,8 @@ using NodeCreatorAny = std::function<std::shared_ptr<Node>(
 ```
 
 参数类型仅支持基本 JSON 类型（bool/int/float/string），数值会使用静态转换处理。
+
+## 6. Python 可选构建
+
+- runtime-only 构建仅依赖 `CreateAny`/`RegisterAny`，不需要 pybind11。
+- 启用 Python 构建后，才会注册 Python Creator 并提供绑定层 `create_node(...)`。

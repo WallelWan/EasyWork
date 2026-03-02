@@ -19,16 +19,21 @@ Requirements:
 
 - C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
 - CMake 3.15+
-- OpenCV (required)
-- Python 3.8+
+- Python 3.8+ (only when `EASYWORK_BUILD_PYTHON=ON`)
+- OpenCV (only when `EASYWORK_WITH_OPENCV=ON`)
 
 ```bash
-mkdir build
-cmake -S . -B build
-cmake --build build
+# Runtime-only (no Python/OpenCV)
+cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
+cmake --build build_rt
+
+# Full build
+cmake -S . -B build_full -DEASYWORK_BUILD_PYTHON=ON -DEASYWORK_WITH_OPENCV=ON
+cmake --build build_full
 ```
 
-The Python extension `easywork_core` is emitted to `python/easywork`.
+The Python extension `easywork_core` is emitted to `python/easywork` when Python build is enabled.
+See `doc/build.md` and `doc/cross_build.md` for build matrix and cross compilation.
 
 ### Python usage
 
@@ -62,7 +67,7 @@ Export a C++-only pipeline to JSON:
 ```python
 pipeline = MyPipeline()
 pipeline.validate()
-pipeline.export_graph("graph.json")
+pipeline.export("graph.json")  # alias: export_graph(...)
 ```
 
 Load the JSON in C++ and run it:
@@ -80,17 +85,21 @@ Notes:
 - Constructor args/kwargs must be primitive JSON types (bool/int/float/string).
 - Node open/close arguments are not serialized in GraphSpec.
 
-### Pure C++ GraphBuild test
+### Runtime-only executables
 
-We ship a standalone C++ test that constructs and runs a graph without Python:
+We ship runtime-only executables that do not require Python:
 
 ```bash
-cmake -S . -B build
-cmake --build build
-./build/easywork_graph_build_test
+cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
+cmake --build build_rt
+./build_rt/easywork_runtime_example
+./build_rt/easywork-run --graph graph.json
 ```
 
-Source: `tests/cpp/graph_build_test.cpp`
+For C++ tests:
+```bash
+ctest --test-dir build_rt
+```
 
 ### Eager mode (no pipeline context)
 
@@ -177,12 +186,21 @@ CMakeLists.txt
 PYTHONPATH=python python -m pytest tests
 ```
 
+Runtime-only C++ tests:
+
+```bash
+ctest --test-dir build_rt
+```
+
 ## Documentation
 
 - `doc/en/runtime_core.md`
 - `doc/en/runtime_types.md`
 - `doc/en/runtime_registry.md`
 - `doc/en/ast_control_flow_design.md`
+- `doc/build.md`
+- `doc/cross_build.md`
+- `doc/ir_schema.md`
 - `doc/cn/runtime_core_cn.md`
 - `doc/cn/runtime_types_cn.md`
 - `doc/cn/runtime_registry_cn.md`

@@ -650,6 +650,9 @@ class Pipeline:
             json.dump(spec, f, ensure_ascii=True, indent=2)
         return path
 
+    def export(self, path):
+        return self.export_graph(path)
+
     def _validate_types(self):
         if hasattr(_core, "register_arithmetic_conversions"):
             _core.register_arithmetic_conversions()

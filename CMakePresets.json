@@ -1,0 +1,83 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 15,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "host-debug",
+      "displayName": "Host Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "EASYWORK_BUILD_PYTHON": "ON",
+        "EASYWORK_WITH_OPENCV": "ON",
+        "EASYWORK_BUILD_EXAMPLES": "ON",
+        "EASYWORK_BUILD_TESTS": "ON",
+        "EASYWORK_FETCH_DEPS": "ON"
+      }
+    },
+    {
+      "name": "host-release-runtime",
+      "displayName": "Host Release Runtime-only",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-release-runtime",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "EASYWORK_BUILD_PYTHON": "OFF",
+        "EASYWORK_WITH_OPENCV": "OFF",
+        "EASYWORK_BUILD_EXAMPLES": "ON",
+        "EASYWORK_BUILD_TESTS": "ON",
+        "EASYWORK_FETCH_DEPS": "OFF"
+      }
+    },
+    {
+      "name": "cross-aarch64-release",
+      "displayName": "Cross AArch64 Release (Template)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cross-aarch64-release",
+      "toolchainFile": "${sourceDir}/toolchains/aarch64-generic.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "EASYWORK_BUILD_PYTHON": "OFF",
+        "EASYWORK_WITH_OPENCV": "OFF",
+        "EASYWORK_BUILD_EXAMPLES": "ON",
+        "EASYWORK_BUILD_TESTS": "ON",
+        "EASYWORK_FETCH_DEPS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-host-debug",
+      "configurePreset": "host-debug"
+    },
+    {
+      "name": "build-host-release-runtime",
+      "configurePreset": "host-release-runtime"
+    },
+    {
+      "name": "build-cross-aarch64-release",
+      "configurePreset": "cross-aarch64-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-host-debug",
+      "configurePreset": "host-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-host-release-runtime",
+      "configurePreset": "host-release-runtime",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

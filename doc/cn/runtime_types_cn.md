@@ -45,3 +45,5 @@ Python 侧 `validate()` 的规则：
 - **AnyToPyRegistry**：将 `std::type_index` 映射到将 `std::any` 转换为 `pybind11::object` 的函数。
 - **注册**：当使用 `EW_REGISTER_NODE` 时，节点的参数和返回类型会通过 `RegisterPythonType<T>()` 自动注册到此系统中。
 - **使用**：当节点结果返回给 Python（在 Eager 模式下）时，框架在此注册表中查找类型，将 `std::any` 载荷转换为原生 Python 对象（例如 `std::vector` -> `list`）。
+
+在 runtime-only 构建（`EASYWORK_BUILD_PYTHON=OFF`）中，Python 相关注册表会被编译裁剪；C++ 运行时的核心类型安全与转换能力保持可用。

@@ -19,8 +19,9 @@ The macro instantiates a static `NodeRegistrar` object. The constructor of this 
 
 ## 2. Node Registry Singleton
 
-`NodeRegistry` is a singleton class that maintains a map of factory functions:
-`std::unordered_map<std::string, NodeCreator> creators_;`
+`NodeRegistry` is a singleton class that maintains factory maps:
+- `creators_any_`: C++ runtime-side creators (`std::any` args/kwargs)
+- `creators_`: Python-side creators (`pybind11::args/kwargs`, only when bindings are enabled)
 
 ### NodeCreator
 The `NodeCreator` is a function with the signature:
@@ -79,3 +80,8 @@ using NodeCreatorAny = std::function<std::shared_ptr<Node>(
 ```
 
 Argument conversion supports primitive JSON types (bool/int/float/string) and performs numeric narrowing by static cast.
+
+## 6. Build-time Optional Python
+
+- Runtime-only builds use `CreateAny`/`RegisterAny` and do not require pybind11.
+- Python builds additionally register Python creators and enable `create_node(...)` from bindings.

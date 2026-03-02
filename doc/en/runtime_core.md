@@ -90,3 +90,19 @@ Limitations:
 - Export fails if the graph contains Python nodes or internal helper nodes.
 - Constructor args/kwargs must be primitive JSON types (bool/int/float/string).
 - Node open/close arguments are not serialized in GraphSpec.
+
+## 7. Runtime-only Build Contract
+
+The runtime path can be built without Python/pybind11/OpenCV:
+
+```bash
+cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
+cmake --build build_rt
+ctest --test-dir build_rt
+```
+
+You can execute exported graph JSON directly:
+
+```bash
+./build_rt/easywork-run --graph graph.json
+```

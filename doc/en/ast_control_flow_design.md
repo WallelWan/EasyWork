@@ -10,6 +10,8 @@
 - Automatic AST transform: `Pipeline.construct()`
 - Manual AST transform: `@ew.ast_transform`
 
+This feature is Python-frontend only. Runtime-only C++ execution consumes exported IR and does not depend on AST transformation.
+
 ## AST Library
 - Use `gast` for uniform AST across Python versions.
 

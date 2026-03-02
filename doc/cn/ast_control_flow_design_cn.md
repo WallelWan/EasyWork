@@ -10,6 +10,8 @@
 - 自动 AST 改写：`Pipeline.construct()`
 - 手动 AST 改写：`@ew.ast_transform`
 
+该能力仅属于 Python 前端。runtime-only 的 C++ 执行只消费导出的 IR，不依赖 AST 改写。
+
 ## AST 库选择
 - 使用 `gast`，便于跨 Python 版本统一 AST 结构。
 

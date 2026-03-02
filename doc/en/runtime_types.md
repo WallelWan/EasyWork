@@ -45,3 +45,5 @@ To support Python interaction, the system maintains a mapping from C++ types to 
 - **AnyToPyRegistry**: Maps `std::type_index` to a function that converts `std::any` -> `pybind11::object`.
 - **Registration**: When `EW_REGISTER_NODE` is used, the arguments and return types of the node are automatically registered into this system using `RegisterPythonType<T>()`.
 - **Usage**: When a node result is returned to Python (in Eager mode), the framework looks up the type in this registry to convert the `std::any` payload into a native Python object (e.g., `std::vector` -> `list`).
+
+In runtime-only builds (`EASYWORK_BUILD_PYTHON=OFF`), Python-specific registries are compiled out and core type safety/conversion remains available for C++ execution.

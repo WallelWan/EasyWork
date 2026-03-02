@@ -12,7 +12,6 @@
 #include "runtime/registry/node_registry.h"
 #include "modules/control_nodes.h"
 #include "modules/module_registry.h"
-#include "runtime/memory/frame.h"
 #include "runtime/types/type_system.h"
 #include "runtime/types/type_converter.h"
 

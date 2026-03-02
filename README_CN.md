@@ -19,16 +19,21 @@ EasyWork 是一个 C++20 + Python 的异构计算图运行时。它基于 Taskfl
 
 - C++20 编译器（GCC 10+, Clang 12+, MSVC 2019+）
 - CMake 3.15+
-- OpenCV（必需）
-- Python 3.8+
+- Python 3.8+（仅当 `EASYWORK_BUILD_PYTHON=ON`）
+- OpenCV（仅当 `EASYWORK_WITH_OPENCV=ON`）
 
 ```bash
-mkdir build
-cmake -S . -B build
-cmake --build build
+# Runtime-only（不依赖 Python/OpenCV）
+cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
+cmake --build build_rt
+
+# Full build
+cmake -S . -B build_full -DEASYWORK_BUILD_PYTHON=ON -DEASYWORK_WITH_OPENCV=ON
+cmake --build build_full
 ```
 
-Python 扩展 `easywork_core` 会输出到 `python/easywork`。
+启用 Python 构建时，扩展 `easywork_core` 会输出到 `python/easywork`。
+构建矩阵和交叉编译请见 `doc/build.md` 与 `doc/cross_build.md`。
 
 ### Python 用法
 
@@ -62,7 +67,7 @@ pipeline.close()
 ```python
 pipeline = MyPipeline()
 pipeline.validate()
-pipeline.export_graph("graph.json")
+pipeline.export("graph.json")  # 兼容别名：export_graph(...)
 ```
 
 在 C++ 中读取 JSON 并运行：
@@ -80,17 +85,21 @@ graph->Run();
 - 构造参数只支持基本 JSON 类型（bool/int/float/string）。
 - GraphSpec 不包含 Node open/close 参数。
 
-### 纯 C++ GraphBuild 测试
+### Runtime-only 可执行文件
 
-提供一个无需 Python 的 C++ 构图测试：
+提供无需 Python 的 runtime 可执行程序：
 
 ```bash
-cmake -S . -B build
-cmake --build build
-./build/easywork_graph_build_test
+cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
+cmake --build build_rt
+./build_rt/easywork_runtime_example
+./build_rt/easywork-run --graph graph.json
 ```
 
-源码：`tests/cpp/graph_build_test.cpp`
+运行 C++ 测试：
+```bash
+ctest --test-dir build_rt
+```
 
 ### Python 节点（自动注册）
 
@@ -215,12 +224,21 @@ CMakeLists.txt
 PYTHONPATH=python python -m pytest tests
 ```
 
+Runtime-only C++ 测试：
+
+```bash
+ctest --test-dir build_rt
+```
+
 ## 文档
 
 - `doc/en/runtime_core.md`
 - `doc/en/runtime_types.md`
 - `doc/en/runtime_registry.md`
 - `doc/en/ast_control_flow_design.md`
+- `doc/build.md`
+- `doc/cross_build.md`
+- `doc/ir_schema.md`
 - `doc/cn/runtime_core_cn.md`
 - `doc/cn/runtime_types_cn.md`
 - `doc/cn/runtime_registry_cn.md`
