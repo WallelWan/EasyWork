@@ -67,3 +67,15 @@ node = MyNode() # uses default 1
 ### Argument Validation
 
 Argument parsing is strict: invalid argument types raise an error instead of silently falling back to defaults. This surfaces configuration bugs early during graph construction.
+
+## 5. C++ GraphBuild Support
+
+`NodeRegistry` also exposes a C++-side creator (`CreateAny`) that accepts `std::any` args/kwargs. This is used by `GraphBuild` when loading JSON GraphSpec files.
+
+```cpp
+using NodeCreatorAny = std::function<std::shared_ptr<Node>(
+    const std::vector<std::any>&,
+    const std::unordered_map<std::string, std::any>&)>;
+```
+
+Argument conversion supports primitive JSON types (bool/int/float/string) and performs numeric narrowing by static cast.

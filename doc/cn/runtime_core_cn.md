@@ -8,6 +8,8 @@
 
 - **Taskflow 集成**：它持有一个 `tf::Taskflow` 对象用于构建静态计算图，以及一个 `tf::Executor` 用于运行它。
 - **状态管理**：维护运行状态（`keep_running` 标志），允许节点发出停止信号（例如 Source 节点完成序列）。
+- **错误策略**：运行时支持 `FailFast`（立即停止）或 `SkipCurrentData`（丢弃当前数据继续）。
+- **图锁定**：运行期间锁定图，防止连接被修改。
 
 ## 2. 节点架构 (Node Architecture)
 
@@ -56,3 +58,35 @@ EasyWork 支持 **异构方法 (Heterogeneous Methods)**，这意味着单个节
 - **IfNode 条件类型**：条件输出必须为 `bool` 或 `int`（含 int64），否则构图期报错。
 - **Mux 控制类型**：控制包必须为 `bool` 或 `int`，未映射的控制值视为错误。
 - **重复运行**：Taskflow 图会重置，但节点自身状态需自行处理可重入。
+
+## 6. GraphBuild（C++ 构建器）与 GraphSpec
+
+EasyWork 提供 C++ 构建器，可读取 Python 导出的 JSON 图描述（GraphSpec）。
+
+### 6.1 C++ GraphBuild
+
+```cpp
+#include "runtime/core/graph_build.h"
+
+auto graph = easywork::GraphBuild::FromJsonFile("graph.json");
+graph->Run();
+```
+
+`GraphBuild` 使用已注册的 C++ 节点构图并运行，复用相同的运行时核心。
+
+### 6.2 GraphSpec JSON
+
+GraphSpec 是一个包含节点、连接、Mux 路由与方法配置的 JSON 文档。
+
+关键字段：
+
+- `nodes`: `{id, type, args, kwargs}` 列表
+- `edges`: `{from:{node_id, method}, to:{node_id, method, arg_idx}}` 列表
+- `mux`: `{consumer_id, method, arg_idx, control_id, map}` 列表
+- `method_config`: `{node_id, order}` / `{node_id, method, sync}` / `{node_id, method, queue_size}`
+
+限制：
+
+- 含 Python 节点或内部辅助节点时，导出直接失败。
+- 构造参数只支持基本 JSON 类型（bool/int/float/string）。
+- GraphSpec 不包含 Node open/close 参数。

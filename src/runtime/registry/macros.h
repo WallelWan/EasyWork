@@ -57,6 +57,7 @@ void RegisterMethodTypes(Ret (Derived::*)(Args...));
             easywork::RegisterMethodTypes(&Self::x); \
             return easywork::MethodMeta{ \
                 easywork::CreateInvoker(&Self::x), \
+                easywork::CreateFastInvoker<&Self::x>(), \
                 easywork::GetArgTypes(&Self::x), \
                 easywork::GetReturnType(&Self::x) \
             }; \

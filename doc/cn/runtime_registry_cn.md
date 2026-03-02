@@ -67,3 +67,15 @@ node = MyNode() # 使用默认值 1
 ### 参数校验
 
 参数解析为严格模式：类型不匹配会直接抛错，而不是回退到默认值，用于提前暴露配置错误。
+
+## 5. C++ GraphBuild 支持
+
+`NodeRegistry` 额外提供 C++ 侧的创建接口（`CreateAny`），用于 `GraphBuild` 解析 JSON GraphSpec。
+
+```cpp
+using NodeCreatorAny = std::function<std::shared_ptr<Node>(
+    const std::vector<std::any>&,
+    const std::unordered_map<std::string, std::any>&)>;
+```
+
+参数类型仅支持基本 JSON 类型（bool/int/float/string），数值会使用静态转换处理。

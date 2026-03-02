@@ -21,6 +21,7 @@
 #include <deque>
 #include <algorithm>
 #include <limits>
+#include <cstdint>
 #include "runtime/memory/frame.h"
 #include "runtime/types/type_system.h"
 #include "runtime/types/type_converter.h"
@@ -33,6 +34,16 @@ namespace easywork {
 constexpr size_t ID_FORWARD = hash_string("forward");
 constexpr size_t ID_OPEN = hash_string("Open");
 constexpr size_t ID_CLOSE = hash_string("Close");
+
+// ========== Error Policy ==========
+
+enum class ErrorPolicy {
+    FailFast = 0,
+    SkipCurrentData = 1,
+};
+
+// Forward declaration
+class Node;
 
 // ========== Graph Container ==========
 
@@ -47,12 +58,68 @@ public:
     tf::Taskflow taskflow;
     tf::Executor executor;
     std::atomic<bool> keep_running{true};
+    std::atomic<bool> skip_current{false};
+    std::atomic<bool> locked{false};
+    ErrorPolicy error_policy{ErrorPolicy::FailFast};
 
     /// Clears the graph and resets the running state.
     void Reset() {
         taskflow.clear();
         keep_running = true;
+        skip_current = false;
+        locked = false;
+        ClearErrors();
+        nodes_.clear();
     }
+
+    void SetErrorPolicy(ErrorPolicy policy) {
+        error_policy = policy;
+    }
+
+    ErrorPolicy GetErrorPolicy() const {
+        return error_policy;
+    }
+
+    void ReportError(const std::string& message) {
+        {
+            std::lock_guard<std::mutex> lock(error_mutex_);
+            last_error_ = message;
+            ++error_count_;
+        }
+        if (error_policy == ErrorPolicy::FailFast) {
+            keep_running = false;
+        } else {
+            skip_current = true;
+        }
+    }
+
+    void ClearErrors() {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        last_error_.clear();
+        error_count_ = 0;
+    }
+
+    std::string LastError() const {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        return last_error_;
+    }
+
+    size_t ErrorCount() const {
+        return error_count_.load();
+    }
+
+    void RegisterNode(Node* node);
+    void ClearOutputsAndBuffers();
+
+    void Lock() { locked = true; }
+    void Unlock() { locked = false; }
+    bool IsLocked() const { return locked.load(); }
+
+private:
+    mutable std::mutex error_mutex_;
+    std::string last_error_;
+    std::atomic<size_t> error_count_{0};
+    std::vector<Node*> nodes_;
 };
 
 // ========== Flow Control ==========
@@ -76,10 +143,12 @@ class Node;
 
 // Unified invoker signature: Type-erased wrapper
 using MethodInvoker = std::function<Packet(Node*, const std::vector<Packet>&)>;
+using FastInvoker = Packet (*)(Node*, const std::vector<Packet>&);
 
 // Reflection metadata for a method
 struct MethodMeta {
     MethodInvoker invoker;
+    FastInvoker fast_invoker{nullptr};
     std::vector<TypeInfo> arg_types;
     TypeInfo return_type;
 };
@@ -131,6 +200,64 @@ MethodInvoker CreateInvoker(Ret (Derived::*func)(Args...)) {
         return detail::InvokeImpl<Derived, Ret, Args...>(
             base_node, func, inputs, std::make_index_sequence<sizeof...(Args)>{});
     };
+}
+
+namespace detail {
+
+template <typename T>
+inline constexpr bool kFastPathType = std::is_trivially_copyable_v<std::decay_t<T>>;
+
+template <typename Ret, typename... Args>
+inline constexpr bool kFastPathCompatible =
+    (std::is_void_v<Ret> || kFastPathType<Ret>) && (kFastPathType<Args> && ...);
+
+template <typename T>
+struct MethodTraits;
+
+template <typename Class, typename Ret, typename... Args>
+struct MethodTraits<Ret (Class::*)(Args...)> {
+    using ClassType = Class;
+    using ReturnType = Ret;
+    using ArgsTuple = std::tuple<Args...>;
+    static constexpr size_t Arity = sizeof...(Args);
+};
+
+template <auto Func, typename Traits, size_t... I>
+Packet FastInvokeImpl(Node* base_node, const std::vector<Packet>& inputs, std::index_sequence<I...>) {
+    using Derived = typename Traits::ClassType;
+    using Ret = typename Traits::ReturnType;
+    if (inputs.size() != sizeof...(I)) {
+        throw std::runtime_error(
+            "Argument count mismatch: expected " + std::to_string(sizeof...(I)) +
+            ", got " + std::to_string(inputs.size())
+        );
+    }
+    return InvokeImpl<Derived, Ret, std::tuple_element_t<I, typename Traits::ArgsTuple>...>(
+        base_node, Func, inputs, std::index_sequence<I...>{});
+}
+
+template <auto Func>
+Packet FastInvoke(Node* base_node, const std::vector<Packet>& inputs) {
+    using Traits = MethodTraits<decltype(Func)>;
+    return FastInvokeImpl<Func, Traits>(base_node, inputs, std::make_index_sequence<Traits::Arity>{});
+}
+
+template <typename Traits, size_t... I>
+constexpr bool FastPathCompatibleTuple(std::index_sequence<I...>) {
+    return (std::is_void_v<typename Traits::ReturnType> || kFastPathType<typename Traits::ReturnType>) &&
+           (kFastPathType<std::tuple_element_t<I, typename Traits::ArgsTuple>> && ...);
+}
+
+} // namespace detail
+
+template <auto Func>
+FastInvoker CreateFastInvoker() {
+    using Traits = detail::MethodTraits<decltype(Func)>;
+    if constexpr (detail::FastPathCompatibleTuple<Traits>(std::make_index_sequence<Traits::Arity>{})) {
+        return &detail::FastInvoke<Func>;
+    } else {
+        return nullptr;
+    }
 }
 
 // Factory: Get argument types
@@ -190,6 +317,9 @@ public:
     std::unordered_map<size_t, AnyCaster> port_converters_;
 
     void add_upstream(Node* n, std::string method = {}, int arg_idx = -1, bool weak = false) {
+        if (graph_ && graph_->IsLocked()) {
+            throw std::runtime_error("Graph is locked. Cannot modify connections.");
+        }
         size_t id = method.empty() ? ID_FORWARD : hash_string(method);
         size_t index = upstreams_.size();
         
@@ -212,6 +342,9 @@ public:
     }
     
     void add_control_input(Node* n) {
+        if (graph_ && graph_->IsLocked()) {
+            throw std::runtime_error("Graph is locked. Cannot modify connections.");
+        }
         size_t index = upstreams_.size();
         upstreams_.push_back({n, 0});
         port_map_.push_back({index, 0, -1, true});
@@ -219,6 +352,9 @@ public:
     }
 
     void ClearUpstreams() {
+        if (graph_ && graph_->IsLocked()) {
+            throw std::runtime_error("Graph is locked. Cannot modify connections.");
+        }
         upstreams_.clear();
         port_map_.clear();
         port_buffers_.clear();
@@ -267,6 +403,12 @@ public:
         output_packet_ = Packet::Empty();
     }
 
+    void ClearBuffers() {
+        for (auto& buffer : port_buffers_) {
+            buffer.clear();
+        }
+    }
+
     virtual void Activate() {}
     
     void Stop() {
@@ -293,6 +435,9 @@ public:
     }
     
     void SetInputMux(const std::string& method, int arg_idx, Node* control, const std::unordered_map<int, Node*>& map) {
+        if (graph_ && graph_->IsLocked()) {
+            throw std::runtime_error("Graph is locked. Cannot modify connections.");
+        }
         size_t id = method.empty() || method == "forward" ? ID_FORWARD : hash_string(method);
         mux_configs_[id][arg_idx] = {control, map};
         bool control_found = false;
@@ -301,6 +446,9 @@ public:
     }
 
     void SetMethodOrder(const std::vector<std::string>& methods) {
+        if (graph_ && graph_->IsLocked()) {
+            throw std::runtime_error("Graph is locked. Cannot modify method order.");
+        }
         method_order_.clear();
         method_order_customized_ = true;
         for (const auto& name : methods) {
@@ -313,11 +461,17 @@ public:
     }
 
     void SetMethodSync(const std::string& method, bool enabled) {
+        if (graph_ && graph_->IsLocked()) {
+            throw std::runtime_error("Graph is locked. Cannot modify method sync.");
+        }
         size_t id = method.empty() || method == "forward" ? ID_FORWARD : hash_string(method);
         method_configs_[id].sync_enabled = enabled;
     }
 
     void SetMethodQueueSize(const std::string& method, size_t max_queue) {
+        if (graph_ && graph_->IsLocked()) {
+            throw std::runtime_error("Graph is locked. Cannot modify method queue size.");
+        }
         size_t id = method.empty() || method == "forward" ? ID_FORWARD : hash_string(method);
         method_configs_[id].max_queue = max_queue;
     }
@@ -479,6 +633,7 @@ public:
 
     void build(ExecutionGraph& g) override {
         graph_ = &g;
+        g.RegisterNode(this);
         
         task_ = g.taskflow.emplace([this]() {
             RunDispatch();
@@ -508,6 +663,7 @@ public:
             }
         }
         PrepareInputConverters();
+        BuildDispatchPlan();
     }
 
     Packet invoke(size_t method_id, const std::vector<Packet>& inputs) override {
@@ -521,9 +677,27 @@ public:
     }
 
 protected:
+    struct MuxPlan {
+        bool enabled{false};
+        int control_port{-1};
+        std::unordered_map<int, int> choice_port;
+        std::vector<int> all_ports;
+    };
+
+    struct MethodPlan {
+        size_t method_id{0};
+        const MethodMeta* meta{nullptr};
+        const MethodInvoker* invoker{nullptr};
+        FastInvoker fast_invoker{nullptr};
+        std::vector<int> port_indices;
+        std::vector<MuxPlan> mux_plans;
+    };
+
     void PrepareInputConverters() {
         RegisterArithmeticConversions();
         port_converters_.clear();
+        port_converters_fast_.clear();
+        port_has_converter_.clear();
         const auto& registry = Derived::method_registry();
 
         for (const auto& [method_id, meta] : registry) {
@@ -574,6 +748,16 @@ protected:
                 }
             }
         }
+
+        const size_t port_count = upstreams_.size();
+        port_converters_fast_.resize(port_count);
+        port_has_converter_.assign(port_count, 0);
+        for (const auto& [port_idx, converter] : port_converters_) {
+            if (port_idx < port_count) {
+                port_converters_fast_[port_idx] = converter;
+                port_has_converter_[port_idx] = 1;
+            }
+        }
     }
 
     TypeInfo UpstreamOutputType(Node* node) const {
@@ -588,72 +772,131 @@ protected:
         return it->second.output_type;
     }
 
+    void BuildDispatchPlan() {
+        method_plans_.clear();
+
+        const auto& order = EffectiveMethodOrder();
+        const auto& registry = Derived::method_registry();
+        for (size_t method_id : order) {
+            auto it = registry.find(method_id);
+            if (it == registry.end()) {
+                continue;
+            }
+
+            MethodPlan plan;
+            plan.method_id = method_id;
+            plan.meta = &it->second;
+            plan.invoker = &it->second.invoker;
+            plan.fast_invoker = it->second.fast_invoker;
+
+            const size_t required_args = it->second.arg_types.size();
+            plan.port_indices.assign(required_args, -1);
+            plan.mux_plans.resize(required_args);
+
+            for (size_t i = 0; i < required_args; ++i) {
+                auto mux_it = mux_configs_.find(method_id);
+                if (mux_it != mux_configs_.end() && mux_it->second.count(i)) {
+                    const auto& cfg = mux_it->second.at(i);
+                    MuxPlan mux_plan;
+                    mux_plan.enabled = true;
+                    mux_plan.control_port = FindControlPortIndex(cfg.control_node);
+                    if (mux_plan.control_port == -1) {
+                        throw std::runtime_error("Mux control port not found during plan build");
+                    }
+                    for (const auto& pair : cfg.map) {
+                        int port_index = FindPortIndex(pair.second, method_id, static_cast<int>(i));
+                        if (port_index == -1) {
+                            throw std::runtime_error("Mux input port not found during plan build");
+                        }
+                        mux_plan.choice_port.emplace(pair.first, port_index);
+                        mux_plan.all_ports.push_back(port_index);
+                    }
+                    plan.mux_plans[i] = std::move(mux_plan);
+                } else {
+                    for (size_t p = 0; p < port_map_.size(); ++p) {
+                        if (port_map_[p].method_id == method_id &&
+                            port_map_[p].arg_index == static_cast<int>(i)) {
+                            plan.port_indices[i] = static_cast<int>(p);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            method_plans_.push_back(std::move(plan));
+        }
+        plan_built_ = true;
+    }
+
     void RunDispatch() {
         try {
+            if (graph_ && graph_->skip_current.load()) {
+                output_packet_ = Packet::Empty();
+                return;
+            }
+
+            if (!plan_built_) {
+                BuildDispatchPlan();
+            }
+
             EnsurePortBufferSize();
             BufferPortInputs();
 
-            const auto& order = EffectiveMethodOrder();
-            const auto& registry = Derived::method_registry();
             bool output_produced = false;
 
-            for (size_t method_id : order) {
-                auto it = registry.find(method_id);
-                if (it == registry.end()) continue;
-                
-                size_t required_args = it->second.arg_types.size();
+            for (const auto& plan : method_plans_) {
+                if (!plan.meta) {
+                    continue;
+                }
+
+                size_t required_args = plan.meta->arg_types.size();
                 std::vector<Packet> inputs;
                 inputs.reserve(required_args);
                 
                 bool method_ready = true;
-                std::unordered_set<int> popped_controls;
+                if (!popped_controls_.empty()) {
+                    std::fill(popped_controls_.begin(), popped_controls_.end(), 0);
+                }
                 
                 for(size_t i=0; i<required_args; ++i) {
                     // Check Mux
                     int selected_port = -1;
                     std::vector<int> discarded_ports;
-                    
-                    if (mux_configs_[method_id].count(i)) {
-                        const auto& cfg = mux_configs_[method_id][i];
-                        int control_port = FindControlPortIndex(cfg.control_node);
+
+                    if (plan.mux_plans.size() > i && plan.mux_plans[i].enabled) {
+                        const auto& mux_plan = plan.mux_plans[i];
+                        int control_port = mux_plan.control_port;
                         if (control_port != -1 && !port_buffers_[control_port].empty()) {
-                            Packet control_pkt = port_buffers_[control_port].front(); 
-                            
+                            Packet control_pkt = port_buffers_[control_port].front();
+
                             int choice = -1;
-                            try {
-                                if (control_pkt.type() == TypeInfo::create<bool>()) {
-                                    choice = control_pkt.cast<bool>() ? 0 : 1;
-                                } else if (control_pkt.type() == TypeInfo::create<int>()) {
-                                    choice = control_pkt.cast<int>();
-                                } else if (control_pkt.type() == TypeInfo::create<int64_t>()) {
-                                    choice = static_cast<int>(control_pkt.cast<int64_t>());
-                                } else {
-                                    throw std::runtime_error("Mux control packet must be bool or int");
-                                }
-                            } catch (const std::exception&) {
-                                throw;
+                            if (control_pkt.type() == TypeInfo::create<bool>()) {
+                                choice = control_pkt.cast<bool>() ? 0 : 1;
+                            } else if (control_pkt.type() == TypeInfo::create<int>()) {
+                                choice = control_pkt.cast<int>();
+                            } else if (control_pkt.type() == TypeInfo::create<int64_t>()) {
+                                choice = static_cast<int>(control_pkt.cast<int64_t>());
+                            } else {
+                                throw std::runtime_error("Mux control packet must be bool or int");
                             }
-                            
-                            auto map_it = cfg.map.find(choice);
-                            if (map_it != cfg.map.end()) {
-                                selected_port = FindPortIndex(map_it->second, method_id, i);
+
+                            auto map_it = mux_plan.choice_port.find(choice);
+                            if (map_it != mux_plan.choice_port.end()) {
+                                selected_port = map_it->second;
                             } else {
                                 throw std::runtime_error("Mux control value has no mapping");
                             }
-                            
-                            for(const auto& pair : cfg.map) {
-                                if (pair.first != choice) {
-                                    int p_idx = FindPortIndex(pair.second, method_id, i);
-                                    if(p_idx != -1) discarded_ports.push_back(p_idx);
+
+                            discarded_ports.reserve(mux_plan.all_ports.size());
+                            for (int p_idx : mux_plan.all_ports) {
+                                if (p_idx != selected_port) {
+                                    discarded_ports.push_back(p_idx);
                                 }
                             }
                         }
                     } else {
-                        for(size_t p=0; p<port_map_.size(); ++p) {
-                            if(port_map_[p].method_id == method_id && port_map_[p].arg_index == static_cast<int>(i)) {
-                                selected_port = static_cast<int>(p);
-                                break;
-                            }
+                        if (plan.port_indices.size() > i) {
+                            selected_port = plan.port_indices[i];
                         }
                     }
                     
@@ -663,12 +906,14 @@ protected:
                         }
                     }
                     
-                    if (selected_port != -1 && selected_port < port_buffers_.size() && !port_buffers_[selected_port].empty()) {
+                    if (selected_port != -1 && selected_port < static_cast<int>(port_buffers_.size()) &&
+                        !port_buffers_[selected_port].empty()) {
                         Packet pkt = port_buffers_[selected_port].front();
                         port_buffers_[selected_port].pop_front();
                         
-                        if(port_converters_.count(selected_port)) {
-                            inputs.push_back(port_converters_[selected_port](pkt));
+                        if (selected_port >= 0 && static_cast<size_t>(selected_port) < port_has_converter_.size() &&
+                            port_has_converter_[selected_port]) {
+                            inputs.push_back(port_converters_fast_[selected_port](pkt));
                         } else {
                             inputs.push_back(std::move(pkt));
                         }
@@ -680,18 +925,27 @@ protected:
                 
                 if (!method_ready) continue;
                 
-                for(size_t i=0; i<required_args; ++i) {
-                     if (mux_configs_[method_id].count(i)) {
-                         int c_idx = FindControlPortIndex(mux_configs_[method_id][i].control_node);
-                         if(c_idx != -1 && !popped_controls.count(c_idx) && !port_buffers_[c_idx].empty()) {
-                             port_buffers_[c_idx].pop_front();
-                             popped_controls.insert(c_idx);
-                         }
-                     }
+                if (popped_controls_.empty()) {
+                    popped_controls_.assign(port_buffers_.size(), 0);
+                }
+                for (size_t i = 0; i < required_args; ++i) {
+                    if (plan.mux_plans.size() > i && plan.mux_plans[i].enabled) {
+                        int c_idx = plan.mux_plans[i].control_port;
+                        if (c_idx != -1 && c_idx < static_cast<int>(popped_controls_.size()) &&
+                            !popped_controls_[c_idx] && !port_buffers_[c_idx].empty()) {
+                            port_buffers_[c_idx].pop_front();
+                            popped_controls_[c_idx] = 1;
+                        }
+                    }
                 }
                 
                 // Invoke
-                Packet result = it->second.invoker(this, inputs);
+                Packet result = Packet::Empty();
+                if (plan.fast_invoker) {
+                    result = plan.fast_invoker(this, inputs);
+                } else if (plan.invoker) {
+                    result = (*plan.invoker)(this, inputs);
+                }
 
                 if (result.has_value()) {
                     if (result.timestamp == 0) {
@@ -711,10 +965,20 @@ protected:
             }
 
         } catch (const std::exception& e) {
-            std::cerr << "Dispatch Error: " << e.what() << std::endl;
+            if (graph_) {
+                graph_->ReportError(std::string("Dispatch Error: ") + e.what());
+            } else {
+                std::cerr << "Dispatch Error: " << e.what() << std::endl;
+            }
             output_packet_ = Packet::Empty();
         }
     }
+
+    std::vector<MethodPlan> method_plans_;
+    bool plan_built_{false};
+    std::vector<AnyCaster> port_converters_fast_;
+    std::vector<uint8_t> port_has_converter_;
+    std::vector<uint8_t> popped_controls_;
 };
 
 // ========== SyncBarrier ==========
@@ -832,11 +1096,36 @@ public:
 
     void run(ExecutionGraph& g) {
         g.keep_running = true;
+        g.Lock();
         
         while (g.keep_running) {
+             g.skip_current = false;
              g.executor.run(g.taskflow).wait();
+             if (g.skip_current && g.error_policy == ErrorPolicy::SkipCurrentData) {
+                 g.ClearOutputsAndBuffers();
+             }
         }
+        g.Unlock();
     }
 };
+
+inline void ExecutionGraph::RegisterNode(Node* node) {
+    if (!node) {
+        return;
+    }
+    if (std::find(nodes_.begin(), nodes_.end(), node) == nodes_.end()) {
+        nodes_.push_back(node);
+    }
+}
+
+inline void ExecutionGraph::ClearOutputsAndBuffers() {
+    for (auto* node : nodes_) {
+        if (!node) {
+            continue;
+        }
+        node->ClearOutput();
+        node->ClearBuffers();
+    }
+}
 
 } // namespace easywork

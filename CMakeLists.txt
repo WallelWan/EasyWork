@@ -50,6 +50,15 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(spdlog)
 message(STATUS "spdlog Built from source")
 
+# nlohmann/json (Header-Only)
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.11.3
+)
+FetchContent_MakeAvailable(nlohmann_json)
+message(STATUS "nlohmann/json Available")
+
 # Python & Pybind11
 find_package(Python3 3.8 COMPONENTS Interpreter Development REQUIRED)
 
@@ -117,17 +126,42 @@ add_library(easywork_runtime INTERFACE)
 target_include_directories(easywork_runtime INTERFACE src)
 
 # Main Extension Module
-pybind11_add_module(easywork_core src/bindings/bindings.cpp)
+pybind11_add_module(easywork_core
+    src/bindings/bindings.cpp
+    src/runtime/graph_build.cpp
+)
+target_compile_definitions(easywork_core PRIVATE EASYWORK_ENABLE_PYBIND)
 target_link_libraries(easywork_core PRIVATE 
     easywork_runtime
     Taskflow::Taskflow 
     ${OpenCV_LIBS} 
     spdlog::spdlog
+    nlohmann_json::nlohmann_json
 )
 
 # Output directory
 set_target_properties(easywork_core PROPERTIES 
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python/easywork
+)
+
+# --- 3. C++ GraphBuild Test ---
+
+add_executable(easywork_graph_build_test
+    tests/cpp/graph_build_test.cpp
+    src/runtime/graph_build.cpp
+)
+target_link_libraries(easywork_graph_build_test PRIVATE
+    easywork_runtime
+    Taskflow::Taskflow
+    ${OpenCV_LIBS}
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+)
+
+add_test(
+    NAME GraphBuildCppTest
+    COMMAND easywork_graph_build_test
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # --- 4. C++ Unit Tests ---

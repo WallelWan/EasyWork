@@ -1,4 +1,6 @@
+import json
 import types
+from datetime import datetime
 
 from . import easywork_core as _core
 
@@ -188,10 +190,18 @@ transform_function = _ast_transform.transform_function
 
 # ========== Node Wrapper ==========
 class NodeWrapper:
-    def __init__(self, raw_node, pipeline=None):
+    def __init__(self, raw_node, pipeline=None, registry_name=None, init_args=None, init_kwargs=None):
         self.raw = raw_node
         self.pipeline = pipeline
         self.built = False
+        self._registry_name = registry_name
+        self._init_args = list(init_args) if init_args is not None else []
+        self._init_kwargs = dict(init_kwargs) if init_kwargs is not None else {}
+        self._method_config = {
+            "order": None,
+            "sync": {},
+            "queue_size": {},
+        }
         
         self._method_name_to_id = {}
         self._id_to_method_name = {}
@@ -202,6 +212,10 @@ class NodeWrapper:
         
         if _core.ID_FORWARD not in self._id_to_method_name:
              self._id_to_method_name[_core.ID_FORWARD] = "forward"
+
+    @property
+    def registry_name(self):
+        return self._registry_name
 
     @property
     def type_name(self):
@@ -245,6 +259,21 @@ class NodeWrapper:
 
     def __call__(self, *args, **kwargs):
         return self._connect("forward", _core.ID_FORWARD, *args, **kwargs)
+
+    def set_method_order(self, methods):
+        self._method_config["order"] = list(methods)
+        return self.raw.set_method_order(methods)
+
+    def set_method_sync(self, method, enabled):
+        self._method_config["sync"][method] = bool(enabled)
+        return self.raw.set_method_sync(method, enabled)
+
+    def set_method_queue_size(self, method, max_queue):
+        self._method_config["queue_size"][method] = int(max_queue)
+        return self.raw.set_method_queue_size(method, max_queue)
+
+    def _method_name_for_id(self, method_id):
+        return self._id_to_method_name.get(method_id)
 
     def _connect(self, method_name, method_id, *args, **kwargs):
         if _ACTIVE_PIPELINE is None:
@@ -301,6 +330,8 @@ class NodeWrapper:
                              )
                 
                 self.raw.set_input_mux(method_name, idx, control, raw_map)
+                if _ACTIVE_PIPELINE:
+                    _ACTIVE_PIPELINE._record_mux(self.raw, method_name, method_id, idx, control, raw_map)
                 continue
 
             if isinstance(arg, Symbol):
@@ -408,6 +439,8 @@ class Pipeline:
         self._has_run = False
         self._connection_metadata = {}
         self._mux_inputs = set()
+        self._mux_metadata = []
+        self._graph.set_error_policy(_core.ErrorPolicy.FailFast)
     
     def __setattr__(self, name, value):
         if isinstance(value, NodeWrapper):
@@ -425,6 +458,20 @@ class Pipeline:
         global _ACTIVE_PIPELINE
         _ACTIVE_PIPELINE = self._previous_pipeline
 
+    def set_error_policy(self, policy):
+        if isinstance(policy, str):
+            key = policy.strip().lower()
+            if key in {"failfast", "fail_fast", "fail"}:
+                policy = _core.ErrorPolicy.FailFast
+            elif key in {"skip", "skipcurrent", "skip_current", "skipcurrentdata"}:
+                policy = _core.ErrorPolicy.SkipCurrentData
+            else:
+                raise ValueError("Unknown error policy: " + policy)
+        self._graph.set_error_policy(policy)
+
+    def get_error_policy(self):
+        return self._graph.get_error_policy()
+
     def _record_connection(self, consumer, consumer_method, input_idx, producer, producer_method):
         if consumer.type_name == "IfNode" and consumer_method == _core.ID_FORWARD and input_idx == 0:
             if producer_method not in producer.type_info.methods:
@@ -441,6 +488,16 @@ class Pipeline:
             return
         self._connection_metadata[key].append(val)
 
+    def _record_mux(self, consumer, method_name, method_id, arg_idx, control, mapping):
+        self._mux_metadata.append({
+            "consumer": consumer,
+            "method_id": method_id,
+            "method": method_name,
+            "arg_idx": arg_idx,
+            "control": control,
+            "map": mapping,
+        })
+
     def construct(self):
         pass
 
@@ -450,6 +507,7 @@ class Pipeline:
         self._clear_internal_nodes()
         self._connection_metadata.clear()
         self._mux_inputs.clear()
+        self._mux_metadata.clear()
 
     def _build_topology(self):
         is_default_construct = self.construct.__func__ is Pipeline.construct
@@ -470,6 +528,127 @@ class Pipeline:
         self._validate_types()
         self._validated = True
         return True
+
+    def _assert_exportable(self):
+        for node in self._nodes:
+            if getattr(node.raw, "is_python_node", False):
+                raise RuntimeError("Graph export does not support Python nodes")
+            if not getattr(node, "registry_name", None):
+                raise RuntimeError("Graph export only supports registered C++ nodes")
+
+    def _json_safe_value(self, value):
+        if isinstance(value, (bool, int, float, str)):
+            return value
+        raise TypeError("Graph export only supports primitive constructor arguments")
+
+    def to_graph_spec(self):
+        self._assert_exportable()
+        node_id_map = {}
+        nodes = []
+        for idx, node in enumerate(self._nodes, start=1):
+            node_id = f"n{idx}"
+            node_id_map[node.raw] = node_id
+            args = [self._json_safe_value(v) for v in getattr(node, "_init_args", [])]
+            kwargs = {
+                str(k): self._json_safe_value(v)
+                for k, v in getattr(node, "_init_kwargs", {}).items()
+            }
+            nodes.append({
+                "id": node_id,
+                "type": node.registry_name,
+                "args": args,
+                "kwargs": kwargs,
+            })
+
+        mux_edges = set()
+        mux = []
+        for entry in getattr(self, "_mux_metadata", []):
+            consumer_id = node_id_map.get(entry["consumer"])
+            control_id = node_id_map.get(entry["control"])
+            if consumer_id is None or control_id is None:
+                raise RuntimeError("Graph export failed to resolve mux nodes")
+            method_name = entry["method"]
+            if not method_name:
+                raise RuntimeError("Graph export failed to resolve mux method name")
+            arg_idx = entry["arg_idx"]
+            mapping = {}
+            for choice, producer in entry["map"].items():
+                producer_id = node_id_map.get(producer)
+                if producer_id is None:
+                    raise RuntimeError("Graph export failed to resolve mux producer")
+                mapping[str(choice)] = producer_id
+                mux_edges.add((entry["consumer"], entry["method_id"], arg_idx, producer))
+            mux.append({
+                "consumer_id": consumer_id,
+                "method": method_name,
+                "arg_idx": arg_idx,
+                "control_id": control_id,
+                "map": mapping,
+            })
+
+        edges = []
+        raw_to_wrapper = {node.raw: node for node in self._nodes}
+        for (consumer, method_id, input_idx), producers in self._connection_metadata.items():
+            for producer, producer_method in producers:
+                if (consumer, method_id, input_idx, producer) in mux_edges:
+                    continue
+                consumer_id = node_id_map.get(consumer)
+                producer_id = node_id_map.get(producer)
+                if consumer_id is None or producer_id is None:
+                    raise RuntimeError("Graph export failed to resolve edge nodes")
+                consumer_wrapper = raw_to_wrapper.get(consumer)
+                producer_wrapper = raw_to_wrapper.get(producer)
+                consumer_method = consumer_wrapper._method_name_for_id(method_id) if consumer_wrapper else None
+                producer_method_name = producer_wrapper._method_name_for_id(producer_method) if producer_wrapper else None
+                if not consumer_method or not producer_method_name:
+                    raise RuntimeError("Graph export failed to resolve method names")
+                edges.append({
+                    "from": {"node_id": producer_id, "method": producer_method_name},
+                    "to": {"node_id": consumer_id, "method": consumer_method, "arg_idx": input_idx},
+                })
+
+        method_config = []
+        for node in self._nodes:
+            node_id = node_id_map[node.raw]
+            config = getattr(node, "_method_config", {})
+            order = config.get("order") if config else None
+            if order:
+                method_config.append({
+                    "node_id": node_id,
+                    "order": list(order),
+                })
+            sync = config.get("sync", {}) if config else {}
+            for method, enabled in sync.items():
+                method_config.append({
+                    "node_id": node_id,
+                    "method": method,
+                    "sync": bool(enabled),
+                })
+            queue_size = config.get("queue_size", {}) if config else {}
+            for method, size in queue_size.items():
+                method_config.append({
+                    "node_id": node_id,
+                    "method": method,
+                    "queue_size": int(size),
+                })
+
+        return {
+            "schema_version": 1,
+            "metadata": {
+                "easywork_version": "unknown",
+                "export_time": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            },
+            "nodes": nodes,
+            "edges": edges,
+            "mux": mux,
+            "method_config": method_config,
+        }
+
+    def export_graph(self, path):
+        spec = self.to_graph_spec()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=True, indent=2)
+        return path
 
     def _validate_types(self):
         if hasattr(_core, "register_arithmetic_conversions"):
@@ -595,7 +774,14 @@ class Pipeline:
             _ACTIVE_PIPELINE = previous
 
     def _register_internal_node(self, cpp_node):
-        wrapper = NodeWrapper(cpp_node)
+        registry_name = None
+        try:
+            type_name = cpp_node.type_name
+            if _core._NodeRegistry.instance().is_registered(type_name):
+                registry_name = type_name
+        except Exception:
+            registry_name = None
+        wrapper = NodeWrapper(cpp_node, registry_name=registry_name)
         self._internal_nodes.append(wrapper)
         if wrapper not in self._nodes:
             self._nodes.append(wrapper)
@@ -631,7 +817,7 @@ class ModuleProxy:
                         if step_value == 0:
                             raise RuntimeError("NumberSource step cannot be 0")
                 node = _core.create_node(name, *args, **kwargs)
-                return NodeWrapper(node)
+                return NodeWrapper(node, registry_name=name, init_args=args, init_kwargs=kwargs)
             return factory
         raise AttributeError(f"Node type '{name}' not found")
 

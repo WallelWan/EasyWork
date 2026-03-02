@@ -8,6 +8,8 @@ The `ExecutionGraph` class manages the global state of the pipeline execution.
 
 - **Taskflow Integration**: It holds a `tf::Taskflow` object where the static computation graph is built, and a `tf::Executor` to run it.
 - **State Management**: It maintains the running state (`keep_running` flag) allowing nodes to signal a stop (e.g., a Source node finishing its sequence).
+- **Error Policy**: Supports `FailFast` (stop immediately) or `SkipCurrentData` (drop current data and continue) at runtime.
+- **Graph Locking**: The graph is locked while running to prevent connection mutation.
 
 ## 2. Node Architecture
 
@@ -56,3 +58,35 @@ Data is exchanged using `Packet` objects, which serve as a universal container.
 - **IfNode condition types**: Conditions must output `bool` or `int` (including int64). Invalid types are rejected during graph construction.
 - **Mux control types**: Control packets must be `bool` or `int`; unmapped control values are treated as errors.
 - **Repeated runs**: The Taskflow graph is reset between runs, but node-level state is user-controlled; nodes should be written to handle re-entry if reused across runs.
+
+## 6. GraphBuild (C++ Builder) and GraphSpec
+
+EasyWork provides a C++ graph builder that can load a JSON graph spec (GraphSpec) exported from Python.
+
+### 6.1 C++ GraphBuild
+
+```cpp
+#include "runtime/core/graph_build.h"
+
+auto graph = easywork::GraphBuild::FromJsonFile("graph.json");
+graph->Run();
+```
+
+`GraphBuild` builds and runs graphs using registered C++ nodes. It uses the same runtime core as Python.
+
+### 6.2 GraphSpec JSON
+
+GraphSpec is a JSON document with nodes, edges, mux routing, and method configuration.
+
+Key fields:
+
+- `nodes`: list of `{id, type, args, kwargs}`
+- `edges`: list of `{from:{node_id, method}, to:{node_id, method, arg_idx}}`
+- `mux`: list of `{consumer_id, method, arg_idx, control_id, map}`
+- `method_config`: list of `{node_id, order}` or `{node_id, method, sync}` or `{node_id, method, queue_size}`
+
+Limitations:
+
+- Export fails if the graph contains Python nodes or internal helper nodes.
+- Constructor args/kwargs must be primitive JSON types (bool/int/float/string).
+- Node open/close arguments are not serialized in GraphSpec.

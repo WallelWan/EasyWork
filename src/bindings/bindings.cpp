@@ -1,4 +1,6 @@
+#ifndef EASYWORK_ENABLE_PYBIND
 #define EASYWORK_ENABLE_PYBIND
+#endif
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <cstdint>
@@ -128,6 +130,7 @@ public:
 
     void build(easywork::ExecutionGraph& g) override {
         graph_ = &g;
+        g.RegisterNode(this);
         task_ = g.taskflow.emplace([this]() { RunDispatch(); });
         task_.name(type_name_);
     }
@@ -421,6 +424,11 @@ private:
 
     void RunDispatch() {
         try {
+            if (graph_ && graph_->skip_current.load()) {
+                output_packet_ = easywork::Packet::Empty();
+                return;
+            }
+
             EnsurePortBufferSize();
             BufferPortInputs();
 
@@ -552,7 +560,11 @@ private:
                 output_packet_ = easywork::Packet::Empty();
             }
         } catch (const std::exception& e) {
-            std::cerr << "Python Dispatch Error: " << e.what() << std::endl;
+            if (graph_) {
+                graph_->ReportError(std::string("Python Dispatch Error: ") + e.what());
+            } else {
+                std::cerr << "Python Dispatch Error: " << e.what() << std::endl;
+            }
             output_packet_ = easywork::Packet::Empty();
         }
     }
@@ -574,6 +586,11 @@ PYBIND11_MODULE(easywork_core, m) {
     m.attr("ID_FORWARD") = easywork::ID_FORWARD;
     m.attr("ID_OPEN") = easywork::ID_OPEN;
     m.attr("ID_CLOSE") = easywork::ID_CLOSE;
+
+    py::enum_<easywork::ErrorPolicy>(m, "ErrorPolicy")
+        .value("FailFast", easywork::ErrorPolicy::FailFast)
+        .value("SkipCurrentData", easywork::ErrorPolicy::SkipCurrentData)
+        .export_values();
 
     // ========== Type System ==========
     
@@ -607,7 +624,11 @@ PYBIND11_MODULE(easywork_core, m) {
 
     py::class_<easywork::ExecutionGraph>(m, "ExecutionGraph")
         .def(py::init<>())
-        .def("reset", &easywork::ExecutionGraph::Reset);
+        .def("reset", &easywork::ExecutionGraph::Reset)
+        .def("set_error_policy", &easywork::ExecutionGraph::SetErrorPolicy)
+        .def("get_error_policy", &easywork::ExecutionGraph::GetErrorPolicy)
+        .def("last_error", &easywork::ExecutionGraph::LastError)
+        .def("error_count", &easywork::ExecutionGraph::ErrorCount);
 
     py::class_<easywork::Executor>(m, "Executor")
         .def(py::init<>())

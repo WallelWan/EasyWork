@@ -55,6 +55,43 @@ pipeline.run()
 pipeline.close()
 ```
 
+### Graph export/import (Python -> JSON -> C++)
+
+Export a C++-only pipeline to JSON:
+
+```python
+pipeline = MyPipeline()
+pipeline.validate()
+pipeline.export_graph("graph.json")
+```
+
+Load the JSON in C++ and run it:
+
+```cpp
+#include "runtime/core/graph_build.h"
+
+auto graph = easywork::GraphBuild::FromJsonFile("graph.json");
+graph->Run();
+```
+
+Notes:
+
+- Export fails if the graph contains Python nodes or internal nodes (e.g., tuple-unpack helpers).
+- Constructor args/kwargs must be primitive JSON types (bool/int/float/string).
+- Node open/close arguments are not serialized in GraphSpec.
+
+### Pure C++ GraphBuild test
+
+We ship a standalone C++ test that constructs and runs a graph without Python:
+
+```bash
+cmake -S . -B build
+cmake --build build
+./build/easywork_graph_build_test
+```
+
+Source: `tests/cpp/graph_build_test.cpp`
+
 ### Eager mode (no pipeline context)
 
 ```python

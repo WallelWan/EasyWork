@@ -55,6 +55,43 @@ pipeline.run()
 pipeline.close()
 ```
 
+### 图导出/导入（Python -> JSON -> C++）
+
+导出仅包含 C++ 节点的 Pipeline 到 JSON：
+
+```python
+pipeline = MyPipeline()
+pipeline.validate()
+pipeline.export_graph("graph.json")
+```
+
+在 C++ 中读取 JSON 并运行：
+
+```cpp
+#include "runtime/core/graph_build.h"
+
+auto graph = easywork::GraphBuild::FromJsonFile("graph.json");
+graph->Run();
+```
+
+说明：
+
+- 图中包含 Python 节点或内部节点（如 tuple 解包节点）会直接终止导出。
+- 构造参数只支持基本 JSON 类型（bool/int/float/string）。
+- GraphSpec 不包含 Node open/close 参数。
+
+### 纯 C++ GraphBuild 测试
+
+提供一个无需 Python 的 C++ 构图测试：
+
+```bash
+cmake -S . -B build
+cmake --build build
+./build/easywork_graph_build_test
+```
+
+源码：`tests/cpp/graph_build_test.cpp`
+
 ### Python 节点（自动注册）
 
 Python 端可直接定义节点类，继承 `ew.PythonNode` 即可自动注册到 C++ 核心：

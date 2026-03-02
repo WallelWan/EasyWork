@@ -11,6 +11,7 @@ class IfNode : public Node {
 public:
     void build(ExecutionGraph& g) override {
         graph_ = &g;
+        g.RegisterNode(this);
         true_task_ = g.taskflow.emplace([]() {});
         false_task_ = g.taskflow.emplace([]() {});
         
@@ -73,6 +74,11 @@ public:
 private:
     void EvaluateCondition() {
         try {
+            if (graph_ && graph_->skip_current.load()) {
+                output_packet_ = Packet::Empty();
+                return;
+            }
+
             EnsurePortBufferSize();
             BufferPortInputs();
             
@@ -109,7 +115,11 @@ private:
 
             output_packet_ = Packet::From(cond, packet.timestamp);
         } catch (const std::exception& e) {
-            std::cerr << "IfNode error: " << e.what() << std::endl;
+            if (graph_) {
+                graph_->ReportError(std::string("IfNode error: ") + e.what());
+            } else {
+                std::cerr << "IfNode error: " << e.what() << std::endl;
+            }
             output_packet_ = Packet::Empty();
         }
     }
