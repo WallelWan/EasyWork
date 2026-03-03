@@ -24,6 +24,8 @@
 #include <cstdint>
 #include "runtime/types/type_system.h"
 #include "runtime/types/type_converter.h"
+#include "runtime/core/error_codes.h"
+#include "runtime/core/logger.h"
 #include "runtime/registry/macros.h"
 
 namespace easywork {
@@ -79,12 +81,20 @@ public:
         return error_policy;
     }
 
-    void ReportError(const std::string& message) {
+    void ReportError(ErrorCode code,
+                     const std::string& message,
+                     std::unordered_map<std::string, std::string> fields = {}) {
         {
             std::lock_guard<std::mutex> lock(error_mutex_);
             last_error_ = message;
             ++error_count_;
+            last_error_code_.store(static_cast<std::uint32_t>(code));
         }
+        if (!fields.contains("error_code")) {
+            fields.emplace("error_code", std::string(ErrorCodeName(code)));
+        }
+        fields["detail"] = message;
+        LogRuntime(RuntimeLogLevel::Error, "Runtime error", std::move(fields));
         if (error_policy == ErrorPolicy::FailFast) {
             keep_running = false;
         } else {
@@ -96,6 +106,7 @@ public:
         std::lock_guard<std::mutex> lock(error_mutex_);
         last_error_.clear();
         error_count_ = 0;
+        last_error_code_.store(static_cast<std::uint32_t>(ErrorCode::Ok));
     }
 
     std::string LastError() const {
@@ -105,6 +116,14 @@ public:
 
     size_t ErrorCount() const {
         return error_count_.load();
+    }
+
+    ErrorCode LastErrorCode() const {
+        return static_cast<ErrorCode>(last_error_code_.load());
+    }
+
+    std::string LastErrorCodeName() const {
+        return std::string(ErrorCodeName(LastErrorCode()));
     }
 
     void RegisterNode(Node* node);
@@ -118,6 +137,7 @@ private:
     mutable std::mutex error_mutex_;
     std::string last_error_;
     std::atomic<size_t> error_count_{0};
+    std::atomic<std::uint32_t> last_error_code_{static_cast<std::uint32_t>(ErrorCode::Ok)};
     std::vector<Node*> nodes_;
 };
 
@@ -412,7 +432,10 @@ public:
     
     void Stop() {
         if (graph_) {
-            std::cout << "Node::Stop called! Stopping graph." << std::endl;
+            LogRuntime(RuntimeLogLevel::Info, "Node requested graph stop", {
+                {"node", type_name()},
+                {"event", "node_stop"},
+            });
             graph_->keep_running = false;
         }
     }
@@ -965,7 +988,10 @@ protected:
 
         } catch (const std::exception& e) {
             if (graph_) {
-                graph_->ReportError(std::string("Dispatch Error: ") + e.what());
+                graph_->ReportError(ErrorCode::DispatchError, std::string("Dispatch Error: ") + e.what(), {
+                    {"node", type_name()},
+                    {"event", "dispatch_exception"},
+                });
             } else {
                 std::cerr << "Dispatch Error: " << e.what() << std::endl;
             }
@@ -1096,14 +1122,40 @@ public:
     void run(ExecutionGraph& g) {
         g.keep_running = true;
         g.Lock();
-        
+        const auto start = std::chrono::steady_clock::now();
+        size_t iterations = 0;
+        LogRuntime(RuntimeLogLevel::Info, "Executor started", {
+            {"event", "executor_start"},
+        });
         while (g.keep_running) {
-             g.skip_current = false;
-             g.executor.run(g.taskflow).wait();
-             if (g.skip_current && g.error_policy == ErrorPolicy::SkipCurrentData) {
-                 g.ClearOutputsAndBuffers();
-             }
+            g.skip_current = false;
+            ++iterations;
+            g.executor.run(g.taskflow).wait();
+            if (g.skip_current && g.error_policy == ErrorPolicy::SkipCurrentData) {
+                g.ClearOutputsAndBuffers();
+                LogRuntime(RuntimeLogLevel::Warn, "Skipped current data after error", {
+                    {"event", "skip_current_data"},
+                    {"error_code", "EW_SKIP_CURRENT_DATA"},
+                });
+            }
         }
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count();
+        std::string stop_reason = "node_stop_or_completion";
+        if (!g.LastError().empty()) {
+            stop_reason = g.GetErrorPolicy() == ErrorPolicy::FailFast
+                              ? "failfast_error"
+                              : "error_skip_current";
+        }
+        LogRuntime(RuntimeLogLevel::Info, "Executor stopped", {
+            {"event", "executor_summary"},
+            {"iterations", std::to_string(iterations)},
+            {"elapsed_ms", std::to_string(elapsed_ms)},
+            {"error_count", std::to_string(g.ErrorCount())},
+            {"last_error_code", g.LastErrorCodeName()},
+            {"stop_reason", stop_reason},
+        });
         g.Unlock();
     }
 };

@@ -1,6 +1,45 @@
 cmake_minimum_required(VERSION 3.15)
 project(easywork LANGUAGES CXX)
 
+function(easywork_check_compiler_matrix)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10.0)
+            message(FATAL_ERROR "EasyWork requires GCC >= 10.0, got ${CMAKE_CXX_COMPILER_VERSION}")
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12.0)
+            message(FATAL_ERROR "EasyWork requires Clang >= 12.0, got ${CMAKE_CXX_COMPILER_VERSION}")
+        endif()
+    elseif(MSVC)
+        if(MSVC_VERSION LESS 1929)
+            message(FATAL_ERROR "EasyWork requires MSVC >= 19.29 (VS2019 16.11), got ${MSVC_VERSION}")
+        endif()
+    endif()
+    message(STATUS "Compiler check passed: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+endfunction()
+
+easywork_check_compiler_matrix()
+
+if(CMAKE_CROSSCOMPILING)
+    message(STATUS "Cross-compiling enabled: ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}")
+    message(STATUS "Cross compiler: ${CMAKE_CXX_COMPILER}")
+    if(CMAKE_SYSROOT)
+        if(NOT EXISTS "${CMAKE_SYSROOT}")
+            message(FATAL_ERROR "Configured CMAKE_SYSROOT does not exist: ${CMAKE_SYSROOT}")
+        endif()
+        message(STATUS "Cross sysroot: ${CMAKE_SYSROOT}")
+    endif()
+    execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} --version
+        RESULT_VARIABLE EASYWORK_CROSS_COMPILER_OK
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(NOT EASYWORK_CROSS_COMPILER_OK EQUAL 0)
+        message(FATAL_ERROR "Cross compiler is not runnable: ${CMAKE_CXX_COMPILER}")
+    endif()
+endif()
+
 # Check C++20 support (String Literal as NTTP)
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("
@@ -44,6 +83,61 @@ find_package(Threads REQUIRED)
 
 # nlohmann_json
 find_package(nlohmann_json QUIET)
+if(NOT nlohmann_json_FOUND)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/extern/nlohmann_json/CMakeLists.txt")
+        set(JSON_BuildTests OFF CACHE INTERNAL "Disable nlohmann_json tests")
+        set(JSON_Install OFF CACHE INTERNAL "Disable nlohmann_json install")
+        add_subdirectory(
+            "${CMAKE_SOURCE_DIR}/extern/nlohmann_json"
+            "${CMAKE_BINARY_DIR}/_deps/nlohmann_json-vendored-build"
+            EXCLUDE_FROM_ALL
+        )
+        if(TARGET nlohmann_json::nlohmann_json)
+            set(nlohmann_json_FOUND ON)
+            message(STATUS "Using vendored nlohmann_json from extern/nlohmann_json")
+        endif()
+    endif()
+endif()
+
+if(NOT nlohmann_json_FOUND)
+    # Compact vendored layouts without CMake package metadata.
+    # Support:
+    # 1) extern/nlohmann_json/include/nlohmann/json.hpp
+    # 2) extern/nlohmann_json/json.hpp (single-header compact form)
+    set(EASYWORK_NLOHMANN_INCLUDE_DIR "")
+    if(EXISTS "${CMAKE_SOURCE_DIR}/extern/nlohmann_json/include/nlohmann/json.hpp")
+        set(EASYWORK_NLOHMANN_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/nlohmann_json/include")
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/extern/nlohmann_json/json.hpp")
+        set(EASYWORK_NLOHMANN_SHIM_DIR "${CMAKE_BINARY_DIR}/_deps/nlohmann_json-shim/include/nlohmann")
+        file(MAKE_DIRECTORY "${EASYWORK_NLOHMANN_SHIM_DIR}")
+        configure_file(
+            "${CMAKE_SOURCE_DIR}/extern/nlohmann_json/json.hpp"
+            "${EASYWORK_NLOHMANN_SHIM_DIR}/json.hpp"
+            COPYONLY
+        )
+        if(EXISTS "${CMAKE_SOURCE_DIR}/extern/nlohmann_json/json_fwd.hpp")
+            configure_file(
+                "${CMAKE_SOURCE_DIR}/extern/nlohmann_json/json_fwd.hpp"
+                "${EASYWORK_NLOHMANN_SHIM_DIR}/json_fwd.hpp"
+                COPYONLY
+            )
+        endif()
+        set(EASYWORK_NLOHMANN_INCLUDE_DIR "${CMAKE_BINARY_DIR}/_deps/nlohmann_json-shim/include")
+    endif()
+
+    if(EASYWORK_NLOHMANN_INCLUDE_DIR)
+        if(NOT TARGET nlohmann_json)
+            add_library(nlohmann_json INTERFACE)
+            target_include_directories(nlohmann_json INTERFACE "${EASYWORK_NLOHMANN_INCLUDE_DIR}")
+        endif()
+        if(NOT TARGET nlohmann_json::nlohmann_json)
+            add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
+        endif()
+        set(nlohmann_json_FOUND ON)
+        message(STATUS "Using compact vendored nlohmann_json from extern/nlohmann_json")
+    endif()
+endif()
+
 if(NOT nlohmann_json_FOUND)
     if(EXISTS "${CMAKE_SOURCE_DIR}/build/_deps/nlohmann_json-src/CMakeLists.txt")
         add_subdirectory(

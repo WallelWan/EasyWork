@@ -8,9 +8,19 @@
 #include <nlohmann/json.hpp>
 
 #include "runtime/registry/node_registry.h"
+#include "runtime/core/logger.h"
 
 namespace easywork {
 namespace {
+
+[[noreturn]] void ThrowGraphError(easywork::ErrorCode code, const std::string& message) {
+    easywork::LogRuntime(easywork::RuntimeLogLevel::Error, "GraphBuild error", {
+        {"event", "graphbuild_error"},
+        {"error_code", std::string(easywork::ErrorCodeName(code))},
+        {"detail", message},
+    });
+    throw std::runtime_error("[" + std::string(easywork::ErrorCodeName(code)) + "] " + message);
+}
 
 std::any JsonToAny(const nlohmann::json& value) {
     if (value.is_boolean()) {
@@ -25,7 +35,7 @@ std::any JsonToAny(const nlohmann::json& value) {
     if (value.is_string()) {
         return std::any(value.get<std::string>());
     }
-    throw std::runtime_error("Unsupported JSON argument type");
+    ThrowGraphError(easywork::ErrorCode::GraphSpecInvalid, "Unsupported JSON argument type");
 }
 
 std::string ReadMethodName(const nlohmann::json& obj) {
@@ -35,7 +45,7 @@ std::string ReadMethodName(const nlohmann::json& obj) {
     if (obj.contains("method_id")) {
         return obj.at("method_id").get<std::string>();
     }
-    throw std::runtime_error("Missing method name in graph spec");
+    ThrowGraphError(easywork::ErrorCode::GraphSpecInvalid, "Missing method name in graph spec");
 }
 
 } // namespace
@@ -55,11 +65,16 @@ void GraphBuild::AddNodeWithId(const std::string& node_id,
                                const std::vector<std::any>& args,
                                const std::unordered_map<std::string, std::any>& kwargs) {
     if (nodes_.count(node_id)) {
-        throw std::runtime_error("Duplicate node id: " + node_id);
+        ThrowGraphError(ErrorCode::GraphSpecInvalid, "Duplicate node id: " + node_id);
     }
     auto node = NodeRegistry::instance().CreateAny(type, args, kwargs);
     nodes_.emplace(node_id, node);
     nodes_in_order_.push_back(node);
+    LogRuntime(RuntimeLogLevel::Info, "Graph node created", {
+        {"event", "graph_node_create"},
+        {"node_id", node_id},
+        {"node_type", type},
+    });
 }
 
 void GraphBuild::Connect(const std::string& from_id, const std::string& from_method,
@@ -68,10 +83,18 @@ void GraphBuild::Connect(const std::string& from_id, const std::string& from_met
     auto from_node = GetNode(from_id);
     auto to_node = GetNode(to_id);
     if (!from_node || !to_node) {
-        throw std::runtime_error("Connect failed: node id not found");
+        ThrowGraphError(ErrorCode::GraphConnectError, "Connect failed: node id not found");
     }
     (void)from_method;
     to_node->set_input_for(to_method, from_node.get(), arg_idx);
+    LogRuntime(RuntimeLogLevel::Debug, "Graph edge connected", {
+        {"event", "graph_connect"},
+        {"from_node", from_id},
+        {"from_method", from_method},
+        {"to_node", to_id},
+        {"to_method", to_method},
+        {"arg_idx", std::to_string(arg_idx)},
+    });
 }
 
 void GraphBuild::SetInputMux(const std::string& consumer_id, const std::string& method,
@@ -80,13 +103,13 @@ void GraphBuild::SetInputMux(const std::string& consumer_id, const std::string& 
     auto consumer = GetNode(consumer_id);
     auto control = GetNode(control_id);
     if (!consumer || !control) {
-        throw std::runtime_error("Mux setup failed: node id not found");
+        ThrowGraphError(ErrorCode::GraphMuxError, "Mux setup failed: node id not found");
     }
     std::unordered_map<int, Node*> raw_map;
     for (const auto& [choice, node_id] : map) {
         auto producer = GetNode(node_id);
         if (!producer) {
-            throw std::runtime_error("Mux setup failed: producer not found");
+            ThrowGraphError(ErrorCode::GraphMuxError, "Mux setup failed: producer not found");
         }
         consumer->set_weak_input(producer.get(), arg_idx);
         raw_map.emplace(choice, producer.get());
@@ -97,7 +120,7 @@ void GraphBuild::SetInputMux(const std::string& consumer_id, const std::string& 
 void GraphBuild::SetMethodOrder(const std::string& node_id, const std::vector<std::string>& order) {
     auto node = GetNode(node_id);
     if (!node) {
-        throw std::runtime_error("Method order failed: node id not found");
+        ThrowGraphError(ErrorCode::GraphNodeNotFound, "Method order failed: node id not found");
     }
     node->SetMethodOrder(order);
 }
@@ -105,7 +128,7 @@ void GraphBuild::SetMethodOrder(const std::string& node_id, const std::vector<st
 void GraphBuild::SetMethodSync(const std::string& node_id, const std::string& method, bool enabled) {
     auto node = GetNode(node_id);
     if (!node) {
-        throw std::runtime_error("Method sync failed: node id not found");
+        ThrowGraphError(ErrorCode::GraphNodeNotFound, "Method sync failed: node id not found");
     }
     node->SetMethodSync(method, enabled);
 }
@@ -113,7 +136,7 @@ void GraphBuild::SetMethodSync(const std::string& node_id, const std::string& me
 void GraphBuild::SetMethodQueueSize(const std::string& node_id, const std::string& method, size_t max_queue) {
     auto node = GetNode(node_id);
     if (!node) {
-        throw std::runtime_error("Method queue size failed: node id not found");
+        ThrowGraphError(ErrorCode::GraphNodeNotFound, "Method queue size failed: node id not found");
     }
     node->SetMethodQueueSize(method, max_queue);
 }
@@ -143,7 +166,15 @@ void GraphBuild::Close() {
 void GraphBuild::Run() {
     BuildGraph();
     Open();
+    LogRuntime(RuntimeLogLevel::Info, "Graph run started", {
+        {"event", "graph_run_start"},
+        {"node_count", std::to_string(nodes_in_order_.size())},
+    });
     executor_.run(graph_);
+    LogRuntime(RuntimeLogLevel::Info, "Graph run finished", {
+        {"event", "graph_run_finish"},
+        {"error_count", std::to_string(graph_.ErrorCount())},
+    });
 }
 
 void GraphBuild::Reset() {
@@ -152,9 +183,13 @@ void GraphBuild::Reset() {
 }
 
 std::unique_ptr<GraphBuild> GraphBuild::FromJsonFile(const std::string& path) {
+    LogRuntime(RuntimeLogLevel::Info, "Loading graph spec from file", {
+        {"event", "graph_load_file"},
+        {"graph_path", path},
+    });
     std::ifstream file(path);
     if (!file) {
-        throw std::runtime_error("Failed to open graph spec file: " + path);
+        ThrowGraphError(ErrorCode::GraphSpecInvalid, "Failed to open graph spec file: " + path);
     }
     std::ostringstream buffer;
     buffer << file.rdbuf();
@@ -163,10 +198,15 @@ std::unique_ptr<GraphBuild> GraphBuild::FromJsonFile(const std::string& path) {
 
 std::unique_ptr<GraphBuild> GraphBuild::FromJsonString(const std::string& content) {
     auto build = std::make_unique<GraphBuild>();
-    nlohmann::json spec = nlohmann::json::parse(content);
+    nlohmann::json spec;
+    try {
+        spec = nlohmann::json::parse(content);
+    } catch (const std::exception& e) {
+        ThrowGraphError(ErrorCode::GraphSpecInvalid, std::string("Invalid graph spec JSON: ") + e.what());
+    }
 
     if (!spec.contains("nodes") || !spec.at("nodes").is_array()) {
-        throw std::runtime_error("Graph spec missing nodes array");
+        ThrowGraphError(ErrorCode::GraphSpecInvalid, "Graph spec missing nodes array");
     }
 
     for (const auto& node : spec.at("nodes")) {
@@ -186,6 +226,11 @@ std::unique_ptr<GraphBuild> GraphBuild::FromJsonString(const std::string& conten
         }
         build->AddNodeWithId(node_id, type, args, kwargs);
     }
+    LogRuntime(RuntimeLogLevel::Info, "Graph spec parsed", {
+        {"event", "graph_parse"},
+        {"node_count", std::to_string(spec.at("nodes").size())},
+        {"edge_count", spec.contains("edges") ? std::to_string(spec.at("edges").size()) : "0"},
+    });
 
     if (spec.contains("edges")) {
         for (const auto& edge : spec.at("edges")) {
@@ -241,6 +286,10 @@ void GraphBuild::BuildGraph() {
     if (built_) {
         return;
     }
+    LogRuntime(RuntimeLogLevel::Info, "Building graph", {
+        {"event", "graph_build_start"},
+        {"node_count", std::to_string(nodes_in_order_.size())},
+    });
     for (const auto& node : nodes_in_order_) {
         node->build(graph_);
     }
@@ -251,6 +300,10 @@ void GraphBuild::BuildGraph() {
         node->Activate();
     }
     built_ = true;
+    LogRuntime(RuntimeLogLevel::Info, "Graph build completed", {
+        {"event", "graph_build_finish"},
+        {"node_count", std::to_string(nodes_in_order_.size())},
+    });
 }
 
 std::shared_ptr<Node> GraphBuild::GetNode(const std::string& node_id) const {

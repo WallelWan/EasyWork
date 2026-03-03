@@ -218,5 +218,6 @@ __marimo__/
 .claude
 .history
 build*
+!doc/build.md
 
 *.avi

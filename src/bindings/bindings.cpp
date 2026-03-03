@@ -560,7 +560,10 @@ private:
             }
         } catch (const std::exception& e) {
             if (graph_) {
-                graph_->ReportError(std::string("Python Dispatch Error: ") + e.what());
+                graph_->ReportError(easywork::ErrorCode::PythonDispatchError, std::string("Python Dispatch Error: ") + e.what(), {
+                    {"node", type_name_},
+                    {"event", "python_dispatch_exception"},
+                });
             } else {
                 std::cerr << "Python Dispatch Error: " << e.what() << std::endl;
             }
@@ -589,6 +592,21 @@ PYBIND11_MODULE(easywork_core, m) {
     py::enum_<easywork::ErrorPolicy>(m, "ErrorPolicy")
         .value("FailFast", easywork::ErrorPolicy::FailFast)
         .value("SkipCurrentData", easywork::ErrorPolicy::SkipCurrentData)
+        .export_values();
+
+    py::enum_<easywork::ErrorCode>(m, "ErrorCode")
+        .value("Ok", easywork::ErrorCode::Ok)
+        .value("RuntimeError", easywork::ErrorCode::RuntimeError)
+        .value("DispatchError", easywork::ErrorCode::DispatchError)
+        .value("PythonDispatchError", easywork::ErrorCode::PythonDispatchError)
+        .value("IfNodeError", easywork::ErrorCode::IfNodeError)
+        .value("GraphSpecInvalid", easywork::ErrorCode::GraphSpecInvalid)
+        .value("GraphNodeNotFound", easywork::ErrorCode::GraphNodeNotFound)
+        .value("GraphConnectError", easywork::ErrorCode::GraphConnectError)
+        .value("GraphMuxError", easywork::ErrorCode::GraphMuxError)
+        .value("RunnerUsageError", easywork::ErrorCode::RunnerUsageError)
+        .value("RunnerConfigError", easywork::ErrorCode::RunnerConfigError)
+        .value("RunnerRuntimeError", easywork::ErrorCode::RunnerRuntimeError)
         .export_values();
 
     // ========== Type System ==========
@@ -627,6 +645,8 @@ PYBIND11_MODULE(easywork_core, m) {
         .def("set_error_policy", &easywork::ExecutionGraph::SetErrorPolicy)
         .def("get_error_policy", &easywork::ExecutionGraph::GetErrorPolicy)
         .def("last_error", &easywork::ExecutionGraph::LastError)
+        .def("last_error_code", &easywork::ExecutionGraph::LastErrorCode)
+        .def("last_error_code_name", &easywork::ExecutionGraph::LastErrorCodeName)
         .def("error_count", &easywork::ExecutionGraph::ErrorCount);
 
     py::class_<easywork::Executor>(m, "Executor")
@@ -755,6 +775,9 @@ PYBIND11_MODULE(easywork_core, m) {
     m.def("get_tuple_size", &easywork::GetTupleSize);
     m.def("register_arithmetic_conversions", &RegisterArithmeticConverters);
     m.def("can_convert", &CanConvertTypes);
+    m.def("error_code_name", [](easywork::ErrorCode code) {
+        return std::string(easywork::ErrorCodeName(code));
+    });
     
     // ========== Debugging Helpers (Optional) ==========
     

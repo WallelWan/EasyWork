@@ -94,6 +94,7 @@ cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
 cmake --build build_rt
 ./build_rt/easywork_runtime_example
 ./build_rt/easywork-run --graph graph.json
+./build_rt/easywork-run --graph graph.json --log-level info --log-format json --log-file /tmp/easywork.log
 ```
 
 运行 C++ 测试：
@@ -239,6 +240,8 @@ ctest --test-dir build_rt
 - `doc/build.md`
 - `doc/cross_build.md`
 - `doc/ir_schema.md`
+- `doc/runtime_logging.md`
+- `doc/error_codes.md`
 - `doc/cn/runtime_core_cn.md`
 - `doc/cn/runtime_types_cn.md`
 - `doc/cn/runtime_registry_cn.md`

@@ -1,6 +1,6 @@
 # PLANS.md — EasyWork 优先级重排计划（AI Coding + 嵌入式上线）
 
-更新日期：2026-03-02
+更新日期：2026-03-03
 
 ## 0. 目标与硬约束
 - 开发态允许 Python（快速迭代）。
@@ -19,30 +19,30 @@
 
 ### P0（必须先做，阻塞上线）
 1. 日志系统与可观测性最小闭环
-- [ ] 增加统一 runtime logger（初始化、级别、输出目标、格式）。
-- [ ] `easywork-run` 支持 `--log-level`、`--log-file`、`--log-format`（text/json）。
-- [ ] 核心路径日志点：图加载、节点创建、连接、调度异常、停止原因、运行摘要。
-- [ ] 文档定义日志字段（time/level/node/method/error_code/trace_id）。
+- [x] 增加统一 runtime logger（初始化、级别、输出目标、格式）。
+- [x] `easywork-run` 支持 `--log-level`、`--log-file`、`--log-format`（text/json）。
+- [x] 核心路径日志点：图加载、节点创建、连接、调度异常、停止原因、运行摘要。
+- [x] 文档定义日志字段（time/level/node/method/error_code/trace_id）。
 
 2. 生产无 Python 强制门禁
-- [ ] 增加 `scripts/check_production_graph.py`：禁止 Python 节点、非法参数、非法 schema。
-- [ ] CI Prod Gate 强制 `EASYWORK_BUILD_PYTHON=OFF`。
-- [ ] 产物清单门禁：禁止打包 Python 扩展。
+- [x] 增加 `scripts/check_production_graph.py`：禁止 Python 节点、非法参数、非法 schema。
+- [x] CI Prod Gate 强制 `EASYWORK_BUILD_PYTHON=OFF`。
+- [x] 产物清单门禁：禁止打包 Python 扩展。
 
 3. Dev/Prod/Cross 三道门禁脚本
-- [ ] `scripts/ci/dev_gate.sh`：full build + ctest + pytest。
-- [ ] `scripts/ci/prod_gate.sh`：runtime-only build + ctest + runner smoke + graph 校验。
-- [ ] `scripts/ci/cross_gate.sh`：cross configure/build；无工具链时明确 skip；版本不符时 fail-fast。
+- [x] `scripts/ci/dev_gate.sh`：full build + ctest + pytest。
+- [x] `scripts/ci/prod_gate.sh`：runtime-only build + ctest + runner smoke + graph 校验。
+- [x] `scripts/ci/cross_gate.sh`：cross configure/build；无工具链时明确 skip；版本不符时 fail-fast。
 
 4. 交叉编译可用性与版本矩阵
-- [ ] 写清最低编译器矩阵（host/cross）。
-- [ ] CMake fail-fast 检查（版本过低直接报错并提示修复）。
-- [ ] toolchain/sysroot 健康检查。
+- [x] 写清最低编译器矩阵（host/cross）。
+- [x] CMake fail-fast 检查（版本过低直接报错并提示修复）。
+- [x] toolchain/sysroot 健康检查。
 
 5. 错误码与稳定失败语义
-- [ ] 定义错误码体系（代替纯字符串错误）。
-- [ ] 统一异常到错误码映射。
-- [ ] 日志/指标里带 error_code。
+- [x] 定义错误码体系（代替纯字符串错误）。
+- [x] 统一异常到错误码映射。
+- [x] 日志/指标里带 error_code。
 
 ### P1（上线前必须完成）
 1. 运行时确定性与资源控制

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime/core/core.h"
+#include "runtime/core/logger.h"
 #include "runtime/registry/node_registry.h"
 #include <algorithm>
 #include <unordered_set>
@@ -116,7 +117,11 @@ private:
             output_packet_ = Packet::From(cond, packet.timestamp);
         } catch (const std::exception& e) {
             if (graph_) {
-                graph_->ReportError(std::string("IfNode error: ") + e.what());
+                graph_->ReportError(ErrorCode::IfNodeError, std::string("IfNode error: ") + e.what(), {
+                    {"node", "IfNode"},
+                    {"method", "forward"},
+                    {"event", "ifnode_exception"},
+                });
             } else {
                 std::cerr << "IfNode error: " << e.what() << std::endl;
             }
