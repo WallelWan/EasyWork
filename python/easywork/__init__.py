@@ -1,4 +1,5 @@
 import json
+import logging
 import types
 from datetime import datetime
 
@@ -6,6 +7,7 @@ from . import easywork_core as _core
 
 _ACTIVE_PIPELINE = None
 _ACTIVE_BRANCH_CONTEXTS = []
+_LOG = logging.getLogger("easywork")
 
 def hash_string(s):
     hash_val = 14695981039346656037
@@ -199,7 +201,6 @@ class NodeWrapper:
         self._init_kwargs = dict(init_kwargs) if init_kwargs is not None else {}
         self._method_config = {
             "order": None,
-            "sync": {},
             "queue_size": {},
         }
         
@@ -263,10 +264,6 @@ class NodeWrapper:
     def set_method_order(self, methods):
         self._method_config["order"] = list(methods)
         return self.raw.set_method_order(methods)
-
-    def set_method_sync(self, method, enabled):
-        self._method_config["sync"][method] = bool(enabled)
-        return self.raw.set_method_sync(method, enabled)
 
     def set_method_queue_size(self, method, max_queue):
         self._method_config["queue_size"][method] = int(max_queue)
@@ -441,7 +438,7 @@ class Pipeline:
         self._mux_inputs = set()
         self._mux_metadata = []
         self._graph.set_error_policy(_core.ErrorPolicy.FailFast)
-    
+
     def __setattr__(self, name, value):
         if isinstance(value, NodeWrapper):
             if hasattr(self, "_nodes") and value not in self._nodes:
@@ -459,14 +456,8 @@ class Pipeline:
         _ACTIVE_PIPELINE = self._previous_pipeline
 
     def set_error_policy(self, policy):
-        if isinstance(policy, str):
-            key = policy.strip().lower()
-            if key in {"failfast", "fail_fast", "fail"}:
-                policy = _core.ErrorPolicy.FailFast
-            elif key in {"skip", "skipcurrent", "skip_current", "skipcurrentdata"}:
-                policy = _core.ErrorPolicy.SkipCurrentData
-            else:
-                raise ValueError("Unknown error policy: " + policy)
+        if not isinstance(policy, _core.ErrorPolicy):
+            raise TypeError("policy must be an easywork_core.ErrorPolicy enum value")
         self._graph.set_error_policy(policy)
 
     def get_error_policy(self):
@@ -512,7 +503,7 @@ class Pipeline:
     def _build_topology(self):
         is_default_construct = self.construct.__func__ is Pipeline.construct
         if self._nodes and is_default_construct:
-            print("[EasyWork] Detected external graph construction, preserving nodes...")
+            _LOG.info("Detected external graph construction, preserving nodes")
             return
 
         self._clear_topology()
@@ -523,7 +514,7 @@ class Pipeline:
         self._with_active_pipeline(construct_fn)
 
     def validate(self):
-        print("[EasyWork] Validating types...")
+        _LOG.info("Validating graph types")
         self._build_topology()
         self._validate_types()
         self._validated = True
@@ -617,13 +608,6 @@ class Pipeline:
                     "node_id": node_id,
                     "order": list(order),
                 })
-            sync = config.get("sync", {}) if config else {}
-            for method, enabled in sync.items():
-                method_config.append({
-                    "node_id": node_id,
-                    "method": method,
-                    "sync": bool(enabled),
-                })
             queue_size = config.get("queue_size", {}) if config else {}
             for method, size in queue_size.items():
                 method_config.append({
@@ -644,14 +628,11 @@ class Pipeline:
             "method_config": method_config,
         }
 
-    def export_graph(self, path):
+    def export(self, path):
         spec = self.to_graph_spec()
         with open(path, "w", encoding="utf-8") as f:
             json.dump(spec, f, ensure_ascii=True, indent=2)
         return path
-
-    def export(self, path):
-        return self.export_graph(path)
 
     def _validate_types(self):
         if hasattr(_core, "register_arithmetic_conversions"):
@@ -740,18 +721,18 @@ class Pipeline:
             self._build_topology()
 
         if self._has_run:
-            print("[EasyWork] Resetting Graph for re-run...")
+            _LOG.info("Resetting Graph for re-run")
             self._graph.reset()
             for node in self._nodes:
                 node.built = False
 
-        print(f"[EasyWork] Materializing Graph ({len(self._nodes)} nodes)...")
+        _LOG.info("Materializing Graph (%d nodes)", len(self._nodes))
         for node in self._nodes:
             if not node.built:
                 node.raw.build(self._graph)
                 node.built = True
 
-        print("[EasyWork] Connecting Edges...")
+        _LOG.info("Connecting Edges")
         for node in self._nodes:
             node.raw.connect()
 
@@ -759,11 +740,11 @@ class Pipeline:
             node.raw.activate()
 
         self._ensure_all_open()
-        print("[EasyWork] Starting Executor...")
+        _LOG.info("Starting Executor")
         try:
             self._executor.run(self._graph)
         except KeyboardInterrupt:
-            print("\n[EasyWork] Stopping...")
+            _LOG.warning("Stopping on KeyboardInterrupt")
         self._has_run = True
         self._validated = False
 

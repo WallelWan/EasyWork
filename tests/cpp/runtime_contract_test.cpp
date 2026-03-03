@@ -62,6 +62,51 @@ int TestIrValidationFailure() {
     }
 }
 
+int TestIrLegacyMethodIdRejected() {
+    try {
+        const char* bad_spec = R"json({
+          "schema_version": 1,
+          "nodes": [
+            {"id": "n1", "type": "NumberSource", "args": [0, 1, 1], "kwargs": {}},
+            {"id": "n2", "type": "MultiplyBy", "args": [2], "kwargs": {}}
+          ],
+          "edges": [
+            {
+              "from": {"node_id": "n1", "method_id": "forward"},
+              "to": {"node_id": "n2", "method": "forward", "arg_idx": 0}
+            }
+          ]
+        })json";
+        auto g = easywork::GraphBuild::FromJsonString(bad_spec);
+        (void)g;
+        std::cerr << "IR legacy method_id contract: expected failure did not happen" << std::endl;
+        return 1;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+int TestIrMethodSyncRejected() {
+    try {
+        const char* bad_spec = R"json({
+          "schema_version": 1,
+          "nodes": [
+            {"id": "n1", "type": "NumberSource", "args": [0, 1, 1], "kwargs": {}}
+          ],
+          "edges": [],
+          "method_config": [
+            {"node_id": "n1", "method": "forward", "sync": true}
+          ]
+        })json";
+        auto g = easywork::GraphBuild::FromJsonString(bad_spec);
+        (void)g;
+        std::cerr << "IR method_config.sync contract: expected failure did not happen" << std::endl;
+        return 1;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -72,6 +117,12 @@ int main() {
         return 1;
     }
     if (TestIrValidationFailure() != 0) {
+        return 1;
+    }
+    if (TestIrLegacyMethodIdRejected() != 0) {
+        return 1;
+    }
+    if (TestIrMethodSyncRejected() != 0) {
         return 1;
     }
 

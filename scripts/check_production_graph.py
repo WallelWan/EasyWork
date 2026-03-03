@@ -120,12 +120,12 @@ def validate_graph_spec(data: dict[str, Any], *, expected_schema: int, allow_nod
         if to_id not in node_ids:
             _fail(errors, f"{prefix}.to.node_id '{to_id}' not found in nodes")
 
-        from_method = from_obj.get("method", from_obj.get("method_id"))
-        to_method = to_obj.get("method", to_obj.get("method_id"))
+        from_method = from_obj.get("method")
+        to_method = to_obj.get("method")
         if not isinstance(from_method, str) or not from_method:
-            _fail(errors, f"{prefix}.from.method/method_id must be a non-empty string")
+            _fail(errors, f"{prefix}.from.method must be a non-empty string")
         if not isinstance(to_method, str) or not to_method:
-            _fail(errors, f"{prefix}.to.method/method_id must be a non-empty string")
+            _fail(errors, f"{prefix}.to.method must be a non-empty string")
 
         arg_idx = to_obj.get("arg_idx")
         if not isinstance(arg_idx, int) or arg_idx < 0:
@@ -184,10 +184,7 @@ def validate_graph_spec(data: dict[str, Any], *, expected_schema: int, allow_nod
             if not isinstance(order, list) or not all(isinstance(x, str) and x for x in order):
                 _fail(errors, f"{prefix}.order must be string array")
         if "sync" in entry:
-            if "method" not in entry or not isinstance(entry["method"], str):
-                _fail(errors, f"{prefix}.method must be string when sync is set")
-            if not isinstance(entry["sync"], bool):
-                _fail(errors, f"{prefix}.sync must be bool")
+            _fail(errors, f"{prefix}.sync is not supported")
         if "queue_size" in entry:
             if "method" not in entry or not isinstance(entry["method"], str):
                 _fail(errors, f"{prefix}.method must be string when queue_size is set")

@@ -135,12 +135,13 @@ public:
     }
 
     void connect() override {
-        for (const auto& conn : upstreams_) {
+        for (const auto& conn : UpstreamConnections()) {
             if (conn.node && !conn.weak) {
                 conn.node->get_task().precede(task_);
             }
         }
         PrepareInputConverters();
+        BuildDispatchPlan();
     }
 
     easywork::NodeTypeInfo get_type_info() const override {
@@ -165,6 +166,20 @@ public:
 
     easywork::Packet invoke(size_t method_id, const std::vector<easywork::Packet>& inputs) override {
         return InvokeMethod(method_id, inputs);
+    }
+
+    bool HasMethod(size_t method_id) const override {
+        return methods_.find(method_id) != methods_.end();
+    }
+
+    void ClearOutput() override {
+        py::gil_scoped_acquire gil;
+        easywork::Node::ClearOutput();
+    }
+
+    void ClearBuffers() override {
+        py::gil_scoped_acquire gil;
+        easywork::Node::ClearBuffers();
     }
 
     std::vector<std::string> GetMethodArgNames(size_t method_id) const {
@@ -347,217 +362,57 @@ private:
     }
 
     void PrepareInputConverters() {
-        easywork::RegisterArithmeticConversions();
-        port_converters_.clear();
-        const auto py_object_type = easywork::TypeInfo::create<py::object>();
-
-        for (const auto& [method_id, meta] : methods_) {
-            for (size_t i = 0; i < meta.arg_count; ++i) {
-                const easywork::TypeInfo& to_type = py_object_type;
-
-                std::vector<easywork::Node*> potential_sources;
-                if (mux_configs_[method_id].count(i)) {
-                    const auto& cfg = mux_configs_[method_id][i];
-                    for (const auto& pair : cfg.map) {
-                        potential_sources.push_back(pair.second);
-                    }
-                } else {
-                    for (const auto& u : upstreams_) {
-                        int idx = FindPortIndex(u.node, method_id, i);
-                        if (idx != -1) {
-                            potential_sources.push_back(u.node);
-                            break;
-                        }
-                    }
-                }
-
-                for (easywork::Node* src : potential_sources) {
-                    int port_index = FindPortIndex(src, method_id, i);
-                    if (port_index == -1) {
-                        continue;
-                    }
-
-                    easywork::TypeInfo from_type = UpstreamOutputType(src);
-                    if (from_type == to_type) {
-                        continue;
-                    }
-
-                    if (*to_type.type_info == typeid(py::object)) {
-                        continue;
-                    }
-
-                    if (!easywork::TypeConverterRegistry::instance().has_converter(*from_type.type_info, *to_type.type_info)) {
-                        throw std::runtime_error(
-                            "Type mismatch: cannot connect " + from_type.type_name +
-                            " to " + to_type.type_name);
-                    }
-
-                    port_converters_[port_index] = [from_type, to_type](const easywork::Packet& packet) {
-                        if (!packet.has_value()) {
-                            return easywork::Packet::Empty();
-                        }
-                        std::any converted = easywork::TypeConverterRegistry::instance().convert(
-                            packet.data(), *from_type.type_info, *to_type.type_info);
-                        if (!converted.has_value()) {
-                            throw std::runtime_error(
-                                "Failed to convert " + from_type.type_name + " to " + to_type.type_name);
-                        }
-                        return easywork::Packet::FromAny(std::move(converted), packet.timestamp);
-                    };
-                }
-            }
-        }
+        MutablePortConverters().clear();
     }
 
-    easywork::TypeInfo UpstreamOutputType(easywork::Node* node) const {
-        if (!node) {
-            return easywork::TypeInfo::create<void>();
+    void BuildDispatchPlan() {
+        dispatch_plans_.clear();
+
+        std::vector<std::pair<size_t, size_t>> method_specs;
+        const auto& order = EffectiveMethodOrder();
+        for (size_t method_id : order) {
+            auto it = methods_.find(method_id);
+            if (it == methods_.end()) {
+                continue;
+            }
+            method_specs.emplace_back(method_id, it->second.arg_count);
         }
-        easywork::NodeTypeInfo info = node->get_type_info();
-        auto it = info.methods.find(easywork::ID_FORWARD);
-        if (it == info.methods.end()) {
-            return easywork::TypeInfo::create<void>();
+
+        BuildDispatchPlans(method_specs, &dispatch_plans_);
+        plan_built_ = true;
+    }
+
+    int DecodeMuxChoice(const easywork::Packet& control_pkt) const {
+        if (control_pkt.type() == easywork::TypeInfo::create<py::object>()) {
+            py::object control_obj = FromPacket(control_pkt);
+            if (py::isinstance<py::bool_>(control_obj)) {
+                return control_obj.cast<bool>() ? 0 : 1;
+            }
+            if (py::isinstance<py::int_>(control_obj)) {
+                return control_obj.cast<int>();
+            }
+            throw std::runtime_error("Mux control packet must be bool or int");
         }
-        return it->second.output_type;
+        return DecodeMuxChoiceDefault(control_pkt);
     }
 
     void RunDispatch() {
         try {
-            if (graph_ && graph_->skip_current.load()) {
-                output_packet_ = easywork::Packet::Empty();
-                return;
+            py::gil_scoped_acquire gil;
+
+            if (!plan_built_) {
+                BuildDispatchPlan();
             }
 
-            EnsurePortBufferSize();
-            BufferPortInputs();
-
-            const auto& order = EffectiveMethodOrder();
-            bool output_produced = false;
-
-            for (size_t method_id : order) {
-                auto it = methods_.find(method_id);
-                if (it == methods_.end()) {
-                    continue;
-                }
-
-                size_t required_args = it->second.arg_count;
-                std::vector<easywork::Packet> inputs;
-                inputs.reserve(required_args);
-
-                bool method_ready = true;
-                std::unordered_set<int> popped_controls;
-
-                for (size_t i = 0; i < required_args; ++i) {
-                    int selected_port = -1;
-                    std::vector<int> discarded_ports;
-
-                    if (mux_configs_[method_id].count(i)) {
-                        const auto& cfg = mux_configs_[method_id][i];
-                        int control_port = FindControlPortIndex(cfg.control_node);
-                        if (control_port != -1 && !port_buffers_[control_port].empty()) {
-                            easywork::Packet control_pkt = port_buffers_[control_port].front();
-
-                            int choice = -1;
-                            if (control_pkt.type() == easywork::TypeInfo::create<bool>()) {
-                                choice = control_pkt.cast<bool>() ? 0 : 1;
-                            } else if (control_pkt.type() == easywork::TypeInfo::create<int>()) {
-                                choice = control_pkt.cast<int>();
-                            } else if (control_pkt.type() == easywork::TypeInfo::create<int64_t>()) {
-                                choice = static_cast<int>(control_pkt.cast<int64_t>());
-                            } else if (control_pkt.type() == easywork::TypeInfo::create<py::object>()) {
-                                py::gil_scoped_acquire gil;
-                                py::object control_obj = FromPacket(control_pkt);
-                                if (py::isinstance<py::bool_>(control_obj)) {
-                                    choice = control_obj.cast<bool>() ? 0 : 1;
-                                } else if (py::isinstance<py::int_>(control_obj)) {
-                                    choice = control_obj.cast<int>();
-                                } else {
-                                    throw std::runtime_error("Mux control packet must be bool or int");
-                                }
-                            } else {
-                                throw std::runtime_error("Mux control packet must be bool or int");
-                            }
-
-                            auto map_it = cfg.map.find(choice);
-                            if (map_it != cfg.map.end()) {
-                                selected_port = FindPortIndex(map_it->second, method_id, i);
-                            } else {
-                                throw std::runtime_error("Mux control value has no mapping");
-                            }
-
-                            for (const auto& pair : cfg.map) {
-                                if (pair.first != choice) {
-                                    int p_idx = FindPortIndex(pair.second, method_id, i);
-                                    if (p_idx != -1) {
-                                        discarded_ports.push_back(p_idx);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        for (size_t p = 0; p < port_map_.size(); ++p) {
-                            if (port_map_[p].method_id == method_id &&
-                                port_map_[p].arg_index == static_cast<int>(i)) {
-                                selected_port = static_cast<int>(p);
-                                break;
-                            }
-                        }
-                    }
-
-                    for (int p_idx : discarded_ports) {
-                        if (p_idx >= 0 && p_idx < static_cast<int>(port_buffers_.size()) && !port_buffers_[p_idx].empty()) {
-                            port_buffers_[p_idx].pop_front();
-                        }
-                    }
-
-                    if (selected_port != -1 && selected_port < static_cast<int>(port_buffers_.size()) &&
-                        !port_buffers_[selected_port].empty()) {
-                        easywork::Packet pkt = port_buffers_[selected_port].front();
-                        port_buffers_[selected_port].pop_front();
-
-                        if (port_converters_.count(selected_port)) {
-                            inputs.push_back(port_converters_[selected_port](pkt));
-                        } else {
-                            inputs.push_back(std::move(pkt));
-                        }
-                    } else {
-                        method_ready = false;
-                        break;
-                    }
-                }
-
-                if (!method_ready) {
-                    continue;
-                }
-
-                for (size_t i = 0; i < required_args; ++i) {
-                    if (mux_configs_[method_id].count(i)) {
-                        int c_idx = FindControlPortIndex(mux_configs_[method_id][i].control_node);
-                        if (c_idx != -1 && !popped_controls.count(c_idx) && !port_buffers_[c_idx].empty()) {
-                            port_buffers_[c_idx].pop_front();
-                            popped_controls.insert(c_idx);
-                        }
-                    }
-                }
-
-                easywork::Packet result = InvokeMethod(method_id, inputs);
-
-                if (result.has_value()) {
-                    if (result.timestamp == 0) {
-                        if (!inputs.empty()) {
-                            result.timestamp = inputs[0].timestamp;
-                        } else {
-                            result.timestamp = easywork::Packet::NowNs();
-                        }
-                    }
-                    output_packet_ = std::move(result);
-                    output_produced = true;
-                }
-            }
-
-            if (!output_produced) {
-                output_packet_ = easywork::Packet::Empty();
-            }
+            RunDispatchPlans(
+                dispatch_plans_,
+                [this](const easywork::Packet& control_pkt) { return DecodeMuxChoice(control_pkt); },
+                [](int, const easywork::Packet& pkt) -> easywork::Packet {
+                    return pkt;
+                },
+                [this](size_t, const DispatchMethodPlan& plan, const std::vector<easywork::Packet>& inputs) {
+                    return InvokeMethod(plan.method_id, inputs);
+                });
         } catch (const std::exception& e) {
             if (graph_) {
                 graph_->ReportError(easywork::ErrorCode::PythonDispatchError, std::string("Python Dispatch Error: ") + e.what(), {
@@ -567,7 +422,7 @@ private:
             } else {
                 std::cerr << "Python Dispatch Error: " << e.what() << std::endl;
             }
-            output_packet_ = easywork::Packet::Empty();
+            ClearOutput();
         }
     }
 
@@ -575,6 +430,8 @@ private:
     std::vector<std::string> exposed_methods_;
     std::string type_name_;
     py::object instance_;
+    std::vector<DispatchMethodPlan> dispatch_plans_;
+    bool plan_built_{false};
 };
 
 } // namespace
@@ -702,14 +559,13 @@ PYBIND11_MODULE(easywork_core, m) {
         .def("set_input_mux", &easywork::Node::SetInputMux, py::arg("method"), py::arg("arg_idx"), py::arg("control"), py::arg("map"))
         .def("clear_upstreams", &easywork::Node::ClearUpstreams)
         .def("set_method_order", &easywork::Node::SetMethodOrder)
-        .def("set_method_sync", &easywork::Node::SetMethodSync)
         .def("set_method_queue_size", &easywork::Node::SetMethodQueueSize)
         .def_property_readonly("type_name", &easywork::Node::type_name)
         .def_property_readonly("type_info", &easywork::Node::get_type_info)
         .def_property_readonly("exposed_methods", &easywork::Node::exposed_methods)
         .def_property_readonly("upstreams", &easywork::Node::get_upstreams)
         .def_property_readonly("connections", [](const easywork::Node& self) {
-            return self.upstreams_;
+            return self.connections();
         })
         .def_property_readonly("is_python_node", [](const easywork::Node& self) {
             return dynamic_cast<const PyNode*>(&self) != nullptr;

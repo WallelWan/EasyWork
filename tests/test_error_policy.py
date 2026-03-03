@@ -55,6 +55,15 @@ def test_error_policy_default_failfast():
 
 
 def test_error_policy_skip_current_data():
-    pipeline, out = _run_pipeline("skip")
+    pipeline, out = _run_pipeline(ew._core.ErrorPolicy.SkipCurrentData)
     assert out == [0, 2, 3]
     assert pipeline.get_error_policy() == ew._core.ErrorPolicy.SkipCurrentData
+
+
+def test_error_policy_rejects_string_alias():
+    pipeline = ew.Pipeline()
+    try:
+        pipeline.set_error_policy("skip")
+        raise AssertionError("set_error_policy should reject string aliases")
+    except TypeError:
+        pass

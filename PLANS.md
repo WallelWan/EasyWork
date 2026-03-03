@@ -1,133 +1,75 @@
-# PLANS.md — EasyWork 优先级重排计划（AI Coding + 嵌入式上线）
+# PLANS.md — EasyWork Pending Backlog Only
 
-更新日期：2026-03-03
+Updated: 2026-03-03
 
-## 0. 目标与硬约束
-- 开发态允许 Python（快速迭代）。
-- 生产态禁止 Python 运行时（`EASYWORK_BUILD_PYTHON=OFF`），只允许 C++ Runtime + IR。
-- 交叉编译与离线构建必须可用（`EASYWORK_FETCH_DEPS=OFF`）。
-- AI 改造必须可被门禁脚本自动验证（构建、测试、回放、图校验）。
+This file keeps only unfinished work. Completed cleanup/contract changes are documented in README and `doc/`.
 
-## 1. 当前已完成
-- [x] CMake 目标拆分与可选依赖（Python/OpenCV 可选）。
-- [x] runtime-only 构建路径 + `easywork-run`。
-- [x] Python 导出 IR（`Pipeline.export()`）。
-- [x] runtime contract tests 初版。
-- [x] Presets 与 cross 模板文件。
+## 0. Goals and Constraints
 
-## 2. 优先级重排
+- Development mode can use Python for fast iteration.
+- Production mode forbids Python runtime (`EASYWORK_BUILD_PYTHON=OFF`), C++ Runtime + IR only.
+- Cross/offline build must remain available (`EASYWORK_FETCH_DEPS=OFF`).
+- AI-assisted changes must be gate-verifiable (build/test/replay/graph validation).
 
-### P0（必须先做，阻塞上线）
-1. 日志系统与可观测性最小闭环
-- [x] 增加统一 runtime logger（初始化、级别、输出目标、格式）。
-- [x] `easywork-run` 支持 `--log-level`、`--log-file`、`--log-format`（text/json）。
-- [x] 核心路径日志点：图加载、节点创建、连接、调度异常、停止原因、运行摘要。
-- [x] 文档定义日志字段（time/level/node/method/error_code/trace_id）。
+## 1. P1 (Must finish before release)
 
-2. 生产无 Python 强制门禁
-- [x] 增加 `scripts/check_production_graph.py`：禁止 Python 节点、非法参数、非法 schema。
-- [x] CI Prod Gate 强制 `EASYWORK_BUILD_PYTHON=OFF`。
-- [x] 产物清单门禁：禁止打包 Python 扩展。
+### 1.1 Runtime determinism and resource control
+- [ ] Standardize backpressure policy (block/drop/downsample).
+- [ ] Define timeout policy and queue-cap policy.
+- [ ] Document memory budget and zero-copy constraints; add tests.
+- [ ] Add deployment profiles for thread/CPU affinity.
 
-3. Dev/Prod/Cross 三道门禁脚本
-- [x] `scripts/ci/dev_gate.sh`：full build + ctest + pytest。
-- [x] `scripts/ci/prod_gate.sh`：runtime-only build + ctest + runner smoke + graph 校验。
-- [x] `scripts/ci/cross_gate.sh`：cross configure/build；无工具链时明确 skip；版本不符时 fail-fast。
+### 1.2 Embedded replay closed loop
+- [ ] Define replay package format (binary + graph + sample + expected metrics).
+- [ ] Implement target replay runner (throughput/latency/drop/error output).
+- [ ] Implement host comparator and gate integration.
 
-4. 交叉编译可用性与版本矩阵
-- [x] 写清最低编译器矩阵（host/cross）。
-- [x] CMake fail-fast 检查（版本过低直接报错并提示修复）。
-- [x] toolchain/sysroot 健康检查。
+### 1.3 IR governance
+- [ ] Define forward/backward compatibility strategy for `schema_version`.
+- [ ] Add IR change log and rollback strategy.
 
-5. 错误码与稳定失败语义
-- [x] 定义错误码体系（代替纯字符串错误）。
-- [x] 统一异常到错误码映射。
-- [x] 日志/指标里带 error_code。
+### 1.4 Unified config system
+- [ ] Unify config sources (CLI/env/file) and precedence.
+- [ ] Add config version validation and default-value governance.
 
-### P1（上线前必须完成）
-1. 运行时确定性与资源控制
-- [ ] 背压策略（阻塞/丢帧/降采样）标准化。
-- [ ] 超时策略与队列上限策略。
-- [ ] 内存预算与零拷贝约束说明 + 测试。
-- [ ] 线程/CPU 亲和策略（部署 profile）。
+## 2. P2 (Continuous evolution)
 
-2. 嵌入式回放验证闭环
-- [ ] 回放包格式（binary + graph + sample + expected metrics）。
-- [ ] target replay runner（输出吞吐/延迟/丢帧/错误）。
-- [ ] host comparator（自动比对并门禁）。
+### 2.1 Python Node -> C++ Node AI migration system
+- [ ] Add `doc/node_contract.md` (types/args/timestamp/exception/order semantics).
+- [ ] Build golden harness (Python reference vs C++ implementation).
+- [ ] Add migration playbook (prototype -> translate -> verify -> release).
 
-3. IR 治理
-- [ ] `schema_version` 兼容策略。
-- [ ] 旧 IR 迁移工具。
-- [ ] 变更日志与回滚策略。
+### 2.2 Security and supply chain
+- [ ] Add IR input validation and allowlist policy.
+- [ ] Add SBOM/signing/license/reproducible-build checks.
+- [ ] Add plugin/node registration allowlist.
 
-4. 配置系统
-- [ ] 统一配置来源（CLI/env/file）与优先级。
-- [ ] 配置版本校验与默认值治理。
+### 2.3 Hardware acceleration roadmap
+- [ ] Define abstraction boundary for CPU/OpenCV/CUDA/NPU/V4L2/GStreamer.
+- [ ] Add backend capability negotiation and deployment profiles.
+- [ ] Add backend replay baselines.
 
-### P2（持续演进）
-1. Python Node -> C++ Node AI 迁移体系
-- [ ] `doc/node_contract.md`（类型、参数、时间戳、异常、顺序语义）。
-- [ ] golden harness（Python 参考 vs C++ 实现）。
-- [ ] 迁移 playbook（原型→翻译→验证→发布）。
+### 2.4 Team and AI collaboration conventions
+- [ ] Add PR template and required gates checklist.
+- [ ] Define AI change granularity rules.
+- [ ] Add protected-directory policy (toolchain/schema/release scripts).
 
-2. 安全与供应链
-- [ ] IR 输入安全校验与白名单。
-- [ ] SBOM、签名、许可证检查、可复现构建。
-- [ ] 插件/节点注册 allowlist。
+## 3. Milestones (Pending Only)
 
-3. 硬件加速路线
-- [ ] CPU/OpenCV/CUDA/NPU/V4L2/GStreamer 抽象边界。
-- [ ] 后端能力协商与 profile。
-- [ ] 后端回放基线。
+### M3 (2026-04-10) — Runtime Stability Baseline
+Scope: P1.1 + P1.2
 
-4. 团队与 AI 协作规范
-- [ ] PR 模板 + 必跑门禁清单。
-- [ ] AI 改动提交粒度规范。
-- [ ] 受保护目录策略（toolchain/schema/release scripts）。
+### M4 (2026-04-25) — IR + Config Governance
+Scope: P1.3 + P1.4
 
-## 3. 里程碑
+### M5 (2026-05-20) — AI Migration Engineering
+Scope: P2.1
 
-### M1（2026-03-12）— 生产可控最小闭环
-范围：P0 的 1/2/3
-验收：
-- 有统一日志系统且 `easywork-run` 可配置日志输出。
-- Prod Gate 可拦截 Python 节点与 Python 产物。
-- Dev/Prod/Cross gate 脚本可在本地跑通。
+### M6 (2026-06-20) — Security + Hardware + Team Rules
+Scope: P2.2 + P2.3 + P2.4
 
-### M2（2026-03-22）— 交叉编译可信
-范围：P0 的 4/5
-验收：
-- 编译器矩阵写入文档并在 CMake 中 fail-fast。
-- cross gate 对“缺工具链/版本不足/正常通过”三种情况行为明确。
-- 错误码体系落地并接入日志。
+## 4. Baseline Validation Commands
 
-### M3（2026-04-10）— 上线稳定性基线
-范围：P1 的 1/2
-验收：
-- 背压/超时/队列策略可配置且有测试。
-- target replay + host comparator 可自动出报告并门禁。
-
-### M4（2026-04-25）— IR 与配置治理
-范围：P1 的 3/4
-验收：
-- IR 版本兼容策略与迁移工具可用。
-- 配置系统统一且有版本校验。
-
-### M5（2026-05-20）— AI 迁移工程化
-范围：P2 的 1
-验收：
-- node contract + golden harness 完整。
-- 至少 1 个 Python 节点通过 AI 迁移到 C++ 并过全部门禁。
-
-### M6（2026-06-20）— 安全与扩展能力
-范围：P2 的 2/3/4
-验收：
-- 安全与供应链检查进入发布流程。
-- 至少 1 条硬件加速 profile 完成回放验证。
-- 团队 AI 协作规范执行落地。
-
-## 4. 验证命令（当前基线）
 Runtime-only:
 ```bash
 cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
@@ -151,6 +93,7 @@ cmake --preset cross-aarch64-release
 cmake --build build/cross-aarch64-release
 ```
 
-## 5. 已知风险
-- 当前环境可能缺少 aarch64 交叉编译器。
-- `tests/test_error_policy.py` 存在进程级 abort，需纳入 dev gate 例外与修复计划。
+## 5. Current Risks
+
+- Some environments may not have an available aarch64 cross toolchain.
+

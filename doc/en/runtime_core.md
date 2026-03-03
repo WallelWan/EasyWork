@@ -1,99 +1,76 @@
 # Runtime Core Architecture
 
-The Runtime Core (`src/runtime/core`) is the heart of EasyWork, responsible for the graph execution engine, node lifecycle management, and data dispatching. It is built on top of [Taskflow](https://taskflow.github.io/) to achieve high-performance static scheduling.
+The Runtime Core (`src/runtime/core`) is the execution engine for EasyWork. It is built on [Taskflow](https://taskflow.github.io/) and now uses a modular header layout plus a shared dispatch engine across C++ and Python nodes.
 
-## 1. Execution Graph
+## 1. Header Layout
 
-The `ExecutionGraph` class manages the global state of the pipeline execution.
+`core.h` is an umbrella include. The implementation is split by responsibility:
 
-- **Taskflow Integration**: It holds a `tf::Taskflow` object where the static computation graph is built, and a `tf::Executor` to run it.
-- **State Management**: It maintains the running state (`keep_running` flag) allowing nodes to signal a stop (e.g., a Source node finishing its sequence).
-- **Error Policy**: Supports `FailFast` (stop immediately) or `SkipCurrentData` (drop current data and continue) at runtime.
-- **Graph Locking**: The graph is locked while running to prevent connection mutation.
+- `ids.h`: method id constants and `ErrorPolicy`
+- `execution_graph.h`: `ExecutionGraph` global state and error tracking
+- `method_reflection.h`: method metadata and invoker factories
+- `node.h`: type-erased `Node`, topology state, shared dispatch planner/runner
+- `base_node.h`: CRTP `BaseNode<Derived>` implementation and fast-path dispatch
+- `executor.h`: execution loop and graph lifecycle helpers
 
-## 2. Node Architecture
+## 2. Execution Graph
 
-The node system is designed around the `Node` base class and the `BaseNode<Derived>` template, providing a Type-Erasure + CRTP (Curiously Recurring Template Pattern) hybrid architecture.
+`ExecutionGraph` manages:
 
-### 2.1 Node Base Class
-`Node` is the type-erased interface used by the runtime engine.
-- **Buffers**: Manages input `port_buffers_` for data buffering.
-- **Upstreams**: Stores `UpstreamConnection` information for graph dependency building.
-- **Reflection**: Provides virtual methods like `get_type_info()` and `invoke()` for runtime introspection.
-- **Configuration**: Handles method-specific settings like `SetMethodOrder`, `SetMethodSync`, and `SetMethodQueueSize`.
+- Taskflow graph (`tf::Taskflow`) and executor (`tf::Executor`)
+- Runtime stop flags (`keep_running`, `skip_current`)
+- Error accounting (`last_error`, `error_count`, `last_error_code`)
+- Error policy (`FailFast` / `SkipCurrentData`)
+- Graph lock state while executing
 
-### 2.2 BaseNode Template
-`BaseNode<Derived>` implements the type-safe logic using CRTP.
-- **Task Creation**: Automatically creates the `tf::Task` in `build()`.
-- **Unified Dispatch**: All nodes (including Source nodes) run `RunDispatch`.
-- **Source Handling**: If a node has a parameter-less `forward` method, `RunDispatch` automatically handles timestamp generation when `forward` is invoked.
+## 3. Node Model
 
-## 3. Dispatch Mechanism
+`Node` is the type-erased runtime interface.
 
-EasyWork supports **Heterogeneous Methods**, meaning a single node can have multiple entry points (methods) with different signatures.
+- Holds topology, port mapping, buffers, method config, and output packet.
+- Internal mutable state is encapsulated (no public mutable internals).
+- Provides controlled accessors for derived classes and bindings.
+- `Open/Close` optional behavior is based on `HasMethod(ID_OPEN/ID_CLOSE)`, not string-matching exception text.
 
-### 3.1 Invoker System
-The framework generates `MethodInvoker` functions (type-erased wrappers) for every exposed method in a node.
-- **Signature**: `std::function<Packet(Node*, const std::vector<Packet>&)>`
-- **Function**: It takes a generic list of `Packet`s, casts them to the specific C++ types required by the method, calls the method, and wraps the result back into a `Packet`.
+## 4. Unified Dispatch Engine
 
-### 3.2 Dispatch Logic (`RunDispatch`)
-The `RunDispatch` loop acts as the local scheduler for each node:
-1.  **Buffer Inputs**: Moves data from upstream nodes into local input buffers.
-2.  **Check Order**: Iterates through methods according to the configured priority (`method_order_`).
-3.  **Check Availability**: Verifies if enough data is available in the buffers for the method's arguments.
-4.  **Type Conversion**: Applies registered `AnyCaster` converters if the upstream type doesn't match the method argument type.
-5.  **Invoke**: Calls the `MethodInvoker`.
-6.  **Timestamping**: If the method returns a value (e.g., Source `forward`), ensures it has a valid timestamp (inheriting from inputs or generating `NowNs()`).
+The shared dispatch core lives in `Node`:
 
-## 4. Packet System
+- `BuildDispatchPlans(...)`
+- `RunDispatchPlans(...)`
 
-Data is exchanged using `Packet` objects, which serve as a universal container.
-- **std::any Payload**: Stores the actual data in a type-safe, type-erased manner.
-- **Shared Ownership**: Uses `std::shared_ptr` to allow zero-copy fan-out to multiple downstream nodes.
-- **Timestamp**: Carries a nanosecond-level timestamp for synchronization.
+Both `BaseNode` and `PyNode` use this engine.
 
-## 5. Graph Construction Constraints
+### 4.1 BaseNode path
 
-- **IfNode condition types**: Conditions must output `bool` or `int` (including int64). Invalid types are rejected during graph construction.
-- **Mux control types**: Control packets must be `bool` or `int`; unmapped control values are treated as errors.
-- **Repeated runs**: The Taskflow graph is reset between runs, but node-level state is user-controlled; nodes should be written to handle re-entry if reused across runs.
+`BaseNode<Derived>` builds method plans from `method_registry()` and keeps:
 
-## 6. GraphBuild (C++ Builder) and GraphSpec
+- type-safe invoker path (`MethodInvoker`)
+- optional fast path (`FastInvoker`) for trivially-copyable signatures
 
-EasyWork provides a C++ graph builder that can load a JSON graph spec (GraphSpec) exported from Python.
+### 4.2 PyNode path
 
-### 6.1 C++ GraphBuild
+`PyNode` now uses the same dispatch planning/execution loop and only customizes:
 
-```cpp
-#include "runtime/core/graph_build.h"
+- method signature introspection from Python callables
+- Python invocation and mux choice decoding for `py::object`
+- GIL-safe buffer/output cleanup overrides
 
-auto graph = easywork::GraphBuild::FromJsonFile("graph.json");
-graph->Run();
-```
+## 5. GraphBuild + GraphSpec Contract
 
-`GraphBuild` builds and runs graphs using registered C++ nodes. It uses the same runtime core as Python.
+`GraphBuild` consumes strict GraphSpec v1:
 
-### 6.2 GraphSpec JSON
+- `schema_version` is required and must be `1`
+- edges must use method names (`from.method`, `to.method`)
+- legacy `method_id` fields are rejected
+- `method_config.sync` is removed and rejected
+- `Connect` validates producer/consumer methods and consumer `arg_idx` bounds
 
-GraphSpec is a JSON document with nodes, edges, mux routing, and method configuration.
+See `doc/ir_schema.md` for the full schema and migration guidance.
 
-Key fields:
+## 6. Runtime-only Contract
 
-- `nodes`: list of `{id, type, args, kwargs}`
-- `edges`: list of `{from:{node_id, method}, to:{node_id, method, arg_idx}}`
-- `mux`: list of `{consumer_id, method, arg_idx, control_id, map}`
-- `method_config`: list of `{node_id, order}` or `{node_id, method, sync}` or `{node_id, method, queue_size}`
-
-Limitations:
-
-- Export fails if the graph contains Python nodes or internal helper nodes.
-- Constructor args/kwargs must be primitive JSON types (bool/int/float/string).
-- Node open/close arguments are not serialized in GraphSpec.
-
-## 7. Runtime-only Build Contract
-
-The runtime path can be built without Python/pybind11/OpenCV:
+Runtime-only builds remain supported:
 
 ```bash
 cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
@@ -101,8 +78,9 @@ cmake --build build_rt
 ctest --test-dir build_rt
 ```
 
-You can execute exported graph JSON directly:
+The strict JSON IR can be executed directly:
 
 ```bash
 ./build_rt/easywork-run --graph graph.json
 ```
+

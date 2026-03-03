@@ -1,99 +1,76 @@
-# 运行时核心架构 (Runtime Core Architecture)
+# 运行时核心架构
 
-运行时核心 (`src/runtime/core`) 是 EasyWork 的心脏，负责图执行引擎、节点生命周期管理和数据分发。它构建在 [Taskflow](https://taskflow.github.io/) 之上，以实现高性能的静态调度。
+运行时核心 (`src/runtime/core`) 是 EasyWork 的图执行引擎，基于 [Taskflow](https://taskflow.github.io/)。当前版本已完成头文件职责拆分，并让 C++/Python 节点共享同一套分发主线。
 
-## 1. 执行图 (Execution Graph)
+## 1. 头文件分层
 
-`ExecutionGraph` 类管理流水线执行的全局状态。
+`core.h` 现在是聚合入口，具体实现按职责拆分为：
 
-- **Taskflow 集成**：它持有一个 `tf::Taskflow` 对象用于构建静态计算图，以及一个 `tf::Executor` 用于运行它。
-- **状态管理**：维护运行状态（`keep_running` 标志），允许节点发出停止信号（例如 Source 节点完成序列）。
-- **错误策略**：运行时支持 `FailFast`（立即停止）或 `SkipCurrentData`（丢弃当前数据继续）。
-- **图锁定**：运行期间锁定图，防止连接被修改。
+- `ids.h`：方法 ID 常量与 `ErrorPolicy`
+- `execution_graph.h`：`ExecutionGraph` 全局状态与错误统计
+- `method_reflection.h`：方法元数据与调用器工厂
+- `node.h`：类型擦除 `Node`、拓扑状态、共享分发计划/执行器
+- `base_node.h`：CRTP `BaseNode<Derived>` 与快路径分发
+- `executor.h`：执行循环与图生命周期辅助
 
-## 2. 节点架构 (Node Architecture)
+## 2. ExecutionGraph
 
-节点系统围绕 `Node` 基类和 `BaseNode<Derived>` 模板设计，提供了一种 类型擦除 + CRTP (奇异递归模板模式) 的混合架构。
+`ExecutionGraph` 负责：
 
-### 2.1 Node 基类
-`Node` 是运行时引擎使用的类型擦除接口。
-- **缓冲**：管理输入 `port_buffers_` 用于数据缓冲。
-- **上游连接**：存储 `UpstreamConnection` 信息用于图依赖构建。
-- **反射**：提供 `get_type_info()` 和 `invoke()` 等虚方法用于运行时内省。
-- **配置**：处理特定于方法的设置，如 `SetMethodOrder`（方法顺序）、`SetMethodSync`（同步）和 `SetMethodQueueSize`（队列大小）。
+- Taskflow 图与执行器
+- 运行停止标志（`keep_running`、`skip_current`）
+- 错误信息（`last_error`、`error_count`、`last_error_code`）
+- 错误策略（`FailFast` / `SkipCurrentData`）
+- 运行时图锁定状态
 
-### 2.2 BaseNode 模板
-`BaseNode<Derived>` 使用 CRTP 实现了类型安全的逻辑。
-- **任务创建**：在 `build()` 中自动创建 `tf::Task`。
-- **统一分发**：所有节点（包括 Source 节点）都运行 `RunDispatch`。
-- **Source 处理**：如果节点有一个无参数的 `forward` 方法，`RunDispatch` 会在调用 `forward` 时自动处理时间戳生成。
+## 3. Node 模型
 
-## 3. 分发机制 (Dispatch Mechanism)
+`Node` 是运行时的类型擦除接口。
 
-EasyWork 支持 **异构方法 (Heterogeneous Methods)**，这意味着单个节点可以有多个具有不同签名的入口点（方法）。
+- 持有拓扑、端口映射、缓冲、方法配置与输出包。
+- 内部可变状态已封装，不再暴露 public 可变成员。
+- 通过受控访问接口供派生类和 bindings 使用。
+- `Open/Close` 可选行为由 `HasMethod(ID_OPEN/ID_CLOSE)` 决定，不再依赖异常文本匹配。
 
-### 3.1 调用器系统 (Invoker System)
-框架为节点中每个暴露的方法生成 `MethodInvoker` 函数（类型擦除包装器）。
-- **签名**：`std::function<Packet(Node*, const std::vector<Packet>&)>`
-- **功能**：它接受通用的 `Packet` 列表，将其转换为方法所需的具体 C++ 类型，调用该方法，并将结果封装回 `Packet`。
+## 4. 统一分发引擎
 
-### 3.2 分发逻辑 (`RunDispatch`)
-`RunDispatch` 循环充当每个节点的本地调度器：
-1.  **缓冲输入**：将数据从上游节点移动到本地输入缓冲区。
-2.  **检查顺序**：按照配置的优先级 (`method_order_`) 遍历方法。
-3.  **检查可用性**：验证缓冲区中是否有足够的数据用于方法的参数。
-4.  **类型转换**：如果上游类型与方法参数类型不匹配，应用注册的 `AnyCaster` 转换器。
-5.  **调用**：执行 `MethodInvoker`。
-6.  **打时间戳**：如果方法返回了值（例如 Source `forward`），确保其具有有效的时间戳（继承自输入或生成 `NowNs()`）。
+共享分发核心在 `Node` 中：
 
-## 4. 数据包系统 (Packet System)
+- `BuildDispatchPlans(...)`
+- `RunDispatchPlans(...)`
 
-数据使用 `Packet` 对象进行交换，它充当通用容器。
-- **std::any 载荷**：以类型安全、类型擦除的方式存储实际数据。
-- **共享所有权**：使用 `std::shared_ptr` 允许零拷贝扇出到多个下游节点。
-- **时间戳**：携带纳秒级时间戳用于同步。
+`BaseNode` 与 `PyNode` 都复用这套引擎。
 
-## 5. 构图期约束
+### 4.1 BaseNode 路径
 
-- **IfNode 条件类型**：条件输出必须为 `bool` 或 `int`（含 int64），否则构图期报错。
-- **Mux 控制类型**：控制包必须为 `bool` 或 `int`，未映射的控制值视为错误。
-- **重复运行**：Taskflow 图会重置，但节点自身状态需自行处理可重入。
+`BaseNode<Derived>` 从 `method_registry()` 构建方法计划，并保留：
 
-## 6. GraphBuild（C++ 构建器）与 GraphSpec
+- 类型安全调用路径（`MethodInvoker`）
+- 针对平凡可拷贝签名的快路径（`FastInvoker`）
 
-EasyWork 提供 C++ 构建器，可读取 Python 导出的 JSON 图描述（GraphSpec）。
+### 4.2 PyNode 路径
 
-### 6.1 C++ GraphBuild
+`PyNode` 使用同一分发主线，仅对以下部分做 Python 特化：
 
-```cpp
-#include "runtime/core/graph_build.h"
+- Python 可调用对象签名解析
+- Python 调用与 `py::object` 的 mux 控制值解码
+- 需要 GIL 的缓冲/输出清理覆写
 
-auto graph = easywork::GraphBuild::FromJsonFile("graph.json");
-graph->Run();
-```
+## 5. GraphBuild 与 GraphSpec 合同
 
-`GraphBuild` 使用已注册的 C++ 节点构图并运行，复用相同的运行时核心。
+`GraphBuild` 读取严格 GraphSpec v1：
 
-### 6.2 GraphSpec JSON
+- 必须提供 `schema_version`，且值必须为 `1`
+- 边必须使用方法名（`from.method`、`to.method`）
+- 旧字段 `method_id` 会被拒绝
+- `method_config.sync` 已移除并拒绝
+- `Connect` 会校验生产者/消费者方法存在性和消费者 `arg_idx` 范围
 
-GraphSpec 是一个包含节点、连接、Mux 路由与方法配置的 JSON 文档。
+完整 schema 与迁移说明见 `doc/ir_schema.md`。
 
-关键字段：
+## 6. Runtime-only 约束
 
-- `nodes`: `{id, type, args, kwargs}` 列表
-- `edges`: `{from:{node_id, method}, to:{node_id, method, arg_idx}}` 列表
-- `mux`: `{consumer_id, method, arg_idx, control_id, map}` 列表
-- `method_config`: `{node_id, order}` / `{node_id, method, sync}` / `{node_id, method, queue_size}`
-
-限制：
-
-- 含 Python 节点或内部辅助节点时，导出直接失败。
-- 构造参数只支持基本 JSON 类型（bool/int/float/string）。
-- GraphSpec 不包含 Node open/close 参数。
-
-## 7. Runtime-only 构建约束
-
-runtime 路径可在无 Python/pybind11/OpenCV 的条件下构建：
+仍支持无 Python 的 runtime-only 构建：
 
 ```bash
 cmake -S . -B build_rt -DEASYWORK_BUILD_PYTHON=OFF -DEASYWORK_WITH_OPENCV=OFF
@@ -101,8 +78,9 @@ cmake --build build_rt
 ctest --test-dir build_rt
 ```
 
-可直接运行导出的图 JSON：
+可直接执行导出的 JSON 图：
 
 ```bash
 ./build_rt/easywork-run --graph graph.json
 ```
+

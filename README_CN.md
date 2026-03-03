@@ -10,6 +10,9 @@ EasyWork 是一个 C++20 + Python 的异构计算图运行时。它基于 Taskfl
 - **Python 优先体验**：pipeline 外立即执行，pipeline 内自动构图。
 - **零拷贝数据支持**：`Packet` 基于 `std::any` 共享数据；`FrameBuffer` 支持 Python Buffer Protocol。
 - **AST 控制流（严格模式）**：`construct()` 中支持原生 `if/else`，并做构图期检查。
+- **严格 GraphSpec v1 合同**：必须提供 `schema_version`；边只允许方法名；旧字段 `method_id` 与 `method_config.sync` 会被拒绝。
+- **统一调度核心**：`BaseNode` 与 `PyNode` 共用同一套分发计划/执行主线。
+- **运行时核心已模块化**：`core.h` 作为聚合入口，内部拆分为 `ids.h`、`execution_graph.h`、`node.h`、`base_node.h`、`executor.h` 等。
 
 ## 快速开始
 
@@ -67,7 +70,7 @@ pipeline.close()
 ```python
 pipeline = MyPipeline()
 pipeline.validate()
-pipeline.export("graph.json")  # 兼容别名：export_graph(...)
+pipeline.export("graph.json")
 ```
 
 在 C++ 中读取 JSON 并运行：
@@ -84,6 +87,10 @@ graph->Run();
 - 图中包含 Python 节点或内部节点（如 tuple 解包节点）会直接终止导出。
 - 构造参数只支持基本 JSON 类型（bool/int/float/string）。
 - GraphSpec 不包含 Node open/close 参数。
+- 运行时加载器要求 `schema_version == 1`。
+- 历史字段 `from.method_id` / `to.method_id` 不再接受。
+- `method_config.sync` 不再接受。
+- 旧图可通过 `scripts/migrate_graph_ir_v1.py` 迁移为 v1。
 
 ### Runtime-only 可执行文件
 
@@ -153,6 +160,7 @@ result = multiplier(10)  # 立即执行，返回 int
 - **运行流程**：`validate()` 负责构图和类型检查；`run()` 会构建 Taskflow 任务、连接依赖并执行；重复 `run()` 会自动重置图。
 - **Open/Close 约束**：`run()` 前必须 `open()`；`Node.open()`/`Node.close()` 只支持位置参数，并且会严格校验参数数量。
 - **Python 节点参数规则**：Pipeline 内允许 Python 节点使用 `kwargs` 与默认值；C++ 节点仍仅支持位置参数。
+- **错误策略 API**：`Pipeline.set_error_policy(...)` 仅接受 `_core.ErrorPolicy` 枚举值。
 
 ## 类型系统与转换
 
@@ -198,7 +206,7 @@ EW_REGISTER_NODE(Scaler, "Scaler", easywork::Arg("factor", 1))
 
 - 方法签名会被反射并用于连接时类型检查。
 - `void` 返回的方法会产生空包，不能连接到需要数据的下游。
-- 可通过 `set_method_order`、`set_method_sync`、`set_method_queue_size` 配置调度与缓冲。
+- 可通过 `set_method_order`、`set_method_queue_size` 配置调度与缓冲。
 
 ## 项目结构
 

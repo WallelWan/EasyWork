@@ -4,7 +4,6 @@
 #include "runtime/core/logger.h"
 #include "runtime/registry/node_registry.h"
 #include <algorithm>
-#include <unordered_set>
 
 namespace easywork {
 
@@ -29,7 +28,7 @@ public:
     }
 
     void connect() override {
-        for (const auto& conn : upstreams_) {
+        for (const auto& conn : UpstreamConnections()) {
             if (conn.node) {
                 conn.node->get_task().precede(task_);
             }
@@ -76,29 +75,31 @@ private:
     void EvaluateCondition() {
         try {
             if (graph_ && graph_->skip_current.load()) {
-                output_packet_ = Packet::Empty();
+                ClearOutput();
                 return;
             }
 
             EnsurePortBufferSize();
             BufferPortInputs();
-            
+
+            const auto& ports = PortMappings();
+            auto& buffers = MutablePortBuffers();
             int port_index = -1;
-            for (size_t i = 0; i < port_map_.size(); ++i) {
-                if (port_map_[i].method_id == ID_FORWARD) {
+            for (size_t i = 0; i < ports.size(); ++i) {
+                if (ports[i].method_id == ID_FORWARD) {
                     port_index = static_cast<int>(i);
                     break;
                 }
             }
 
-            if (port_index == -1 || port_buffers_[port_index].empty()) {
-                output_packet_ = Packet::Empty();
+            if (port_index == -1 || buffers[port_index].empty()) {
+                ClearOutput();
                 return;
             }
 
             size_t p_idx = static_cast<size_t>(port_index);
-            Packet packet = port_buffers_[p_idx].front();
-            port_buffers_[p_idx].pop_front();
+            Packet packet = buffers[p_idx].front();
+            buffers[p_idx].pop_front();
 
             bool cond = false;
             if (packet.has_value()) {
@@ -114,7 +115,7 @@ private:
                 }
             }
 
-            output_packet_ = Packet::From(cond, packet.timestamp);
+            SetOutputPacket(Packet::From(cond, packet.timestamp));
         } catch (const std::exception& e) {
             if (graph_) {
                 graph_->ReportError(ErrorCode::IfNodeError, std::string("IfNode error: ") + e.what(), {
@@ -125,15 +126,19 @@ private:
             } else {
                 std::cerr << "IfNode error: " << e.what() << std::endl;
             }
-            output_packet_ = Packet::Empty();
+            ClearOutput();
         }
     }
     
     int SelectBranch() {
-        if (!output_packet_.has_value()) return 1;
+        if (!OutputPacket().has_value()) {
+            return 1;
+        }
         try {
-            return output_packet_.cast<bool>() ? 0 : 1;
-        } catch(...) { return 1; }
+            return OutputPacket().cast<bool>() ? 0 : 1;
+        } catch (...) {
+            return 1;
+        }
     }
 
     void AddBranchNode(Node* node, std::vector<Node*>& target) {

@@ -10,6 +10,9 @@ EasyWork is a C++20 + Python runtime for building heterogeneous, type-safe compu
 - **Python-first workflow**: Eager execution outside pipelines; tracing inside pipelines.
 - **Zero-copy data support**: `Packet` uses `std::any` + shared ownership; `FrameBuffer` supports Python buffer protocol.
 - **AST control flow (strict)**: Native `if/else` translated to efficient mux-based routing with compile-time checks.
+- **Strict GraphSpec v1 contract**: `schema_version` is required; edges must use method names; legacy `method_id` and `method_config.sync` are rejected.
+- **Unified dispatch core**: `BaseNode` and `PyNode` share the same dispatch planning/execution path.
+- **Runtime core modularized**: `core.h` is now an umbrella over split headers (`ids.h`, `execution_graph.h`, `node.h`, `base_node.h`, `executor.h`, etc.).
 
 ## Quick Start
 
@@ -67,7 +70,7 @@ Export a C++-only pipeline to JSON:
 ```python
 pipeline = MyPipeline()
 pipeline.validate()
-pipeline.export("graph.json")  # alias: export_graph(...)
+pipeline.export("graph.json")
 ```
 
 Load the JSON in C++ and run it:
@@ -84,6 +87,10 @@ Notes:
 - Export fails if the graph contains Python nodes or internal nodes (e.g., tuple-unpack helpers).
 - Constructor args/kwargs must be primitive JSON types (bool/int/float/string).
 - Node open/close arguments are not serialized in GraphSpec.
+- Runtime loader requires `schema_version == 1`.
+- Legacy edge fields `from.method_id` / `to.method_id` are not accepted.
+- `method_config.sync` is no longer accepted.
+- Use `scripts/migrate_graph_ir_v1.py` to migrate legacy specs to v1.
 
 ### Runtime-only executables
 
@@ -115,6 +122,7 @@ result = multiplier(10)  # executes immediately, returns int
 - **Tracing mode**: Inside `Pipeline.construct()` or `with pipeline:` blocks, node calls return `Symbol` objects and build graph connections.
 - **Run lifecycle**: `validate()` builds topology and checks types; `run()` builds Taskflow tasks, connects edges, and executes; repeated `run()` resets the graph internally.
 - **Open/close**: Nodes must be opened before `run()`. `Node.open()`/`Node.close()` only accept positional args (no kwargs) and enforce argument counts.
+- **Error policy API**: `Pipeline.set_error_policy(...)` only accepts `_core.ErrorPolicy` enum values.
 
 ## Type System & Conversion
 
@@ -160,7 +168,7 @@ Notes:
 
 - Each method signature is reflected and type-checked at connect time.
 - `void` methods return empty packets; they cannot be wired into consumers expecting data.
-- Methods can be prioritized and synchronized via `set_method_order`, `set_method_sync`, and `set_method_queue_size`.
+- Methods can be prioritized and buffered via `set_method_order` and `set_method_queue_size`.
 
 ## Project Layout
 

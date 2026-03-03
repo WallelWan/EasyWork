@@ -34,7 +34,7 @@ When the extension is built without converter exposure, validation defaults to s
 
 ## 3. Packet & std::any
 
-The `Packet` class (defined in `core.h` but heavily relying on the type system) uses `std::any` to store data.
+The `Packet` class (defined in `src/runtime/types/type_system.h`) uses `std::any` to store data.
 - **Type Erasure**: Allows the graph to handle any C++ type without templates infecting the core engine.
 - **Validation**: `Packet::cast<T>()` verifies the stored `typeid` against the requested `T` before casting, throwing a clear error on mismatch.
 

@@ -34,7 +34,7 @@ Python 侧 `validate()` 的规则：
 
 ## 3. Packet 与 std::any
 
-`Packet` 类（定义在 `core.h` 中，但严重依赖类型系统）使用 `std::any` 存储数据。
+`Packet` 类（定义在 `src/runtime/types/type_system.h`）使用 `std::any` 存储数据。
 - **类型擦除**：允许图处理任何 C++ 类型，而无需模板感染核心引擎。
 - **验证**：`Packet::cast<T>()` 在转换前验证存储的 `typeid` 是否与请求的 `T` 匹配，不匹配时抛出清晰的错误。
 

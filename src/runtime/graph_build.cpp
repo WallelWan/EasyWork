@@ -39,13 +39,20 @@ std::any JsonToAny(const nlohmann::json& value) {
 }
 
 std::string ReadMethodName(const nlohmann::json& obj) {
-    if (obj.contains("method")) {
-        return obj.at("method").get<std::string>();
+    if (obj.contains("method") && obj.at("method").is_string()) {
+        std::string method = obj.at("method").get<std::string>();
+        if (!method.empty()) {
+            return method;
+        }
     }
-    if (obj.contains("method_id")) {
-        return obj.at("method_id").get<std::string>();
+    ThrowGraphError(easywork::ErrorCode::GraphSpecInvalid, "Missing or invalid method name in graph spec");
+}
+
+size_t MethodIdFromName(const std::string& method) {
+    if (method.empty() || method == "forward") {
+        return ID_FORWARD;
     }
-    ThrowGraphError(easywork::ErrorCode::GraphSpecInvalid, "Missing method name in graph spec");
+    return hash_string(method);
 }
 
 } // namespace
@@ -80,12 +87,40 @@ void GraphBuild::AddNodeWithId(const std::string& node_id,
 void GraphBuild::Connect(const std::string& from_id, const std::string& from_method,
                          const std::string& to_id, const std::string& to_method,
                          int arg_idx) {
+    if (arg_idx < 0) {
+        ThrowGraphError(ErrorCode::GraphConnectError, "Connect failed: arg_idx must be non-negative");
+    }
     auto from_node = GetNode(from_id);
     auto to_node = GetNode(to_id);
     if (!from_node || !to_node) {
         ThrowGraphError(ErrorCode::GraphConnectError, "Connect failed: node id not found");
     }
-    (void)from_method;
+
+    const size_t from_method_id = MethodIdFromName(from_method);
+    const auto from_type_info = from_node->get_type_info();
+    if (!from_type_info.methods.contains(from_method_id)) {
+        ThrowGraphError(
+            ErrorCode::GraphConnectError,
+            "Connect failed: producer method not found: " + from_method
+        );
+    }
+
+    const size_t to_method_id = MethodIdFromName(to_method);
+    const auto to_type_info = to_node->get_type_info();
+    auto to_it = to_type_info.methods.find(to_method_id);
+    if (to_it == to_type_info.methods.end()) {
+        ThrowGraphError(
+            ErrorCode::GraphConnectError,
+            "Connect failed: consumer method not found: " + to_method
+        );
+    }
+    if (static_cast<size_t>(arg_idx) >= to_it->second.input_types.size()) {
+        ThrowGraphError(
+            ErrorCode::GraphConnectError,
+            "Connect failed: arg_idx out of range for consumer method: " + to_method
+        );
+    }
+
     to_node->set_input_for(to_method, from_node.get(), arg_idx);
     LogRuntime(RuntimeLogLevel::Debug, "Graph edge connected", {
         {"event", "graph_connect"},
@@ -123,14 +158,6 @@ void GraphBuild::SetMethodOrder(const std::string& node_id, const std::vector<st
         ThrowGraphError(ErrorCode::GraphNodeNotFound, "Method order failed: node id not found");
     }
     node->SetMethodOrder(order);
-}
-
-void GraphBuild::SetMethodSync(const std::string& node_id, const std::string& method, bool enabled) {
-    auto node = GetNode(node_id);
-    if (!node) {
-        ThrowGraphError(ErrorCode::GraphNodeNotFound, "Method sync failed: node id not found");
-    }
-    node->SetMethodSync(method, enabled);
 }
 
 void GraphBuild::SetMethodQueueSize(const std::string& node_id, const std::string& method, size_t max_queue) {
@@ -208,6 +235,12 @@ std::unique_ptr<GraphBuild> GraphBuild::FromJsonString(const std::string& conten
     if (!spec.contains("nodes") || !spec.at("nodes").is_array()) {
         ThrowGraphError(ErrorCode::GraphSpecInvalid, "Graph spec missing nodes array");
     }
+    if (!spec.contains("schema_version") || !spec.at("schema_version").is_number_integer()) {
+        ThrowGraphError(ErrorCode::GraphSpecInvalid, "Graph spec missing schema_version");
+    }
+    if (spec.at("schema_version").get<int>() != 1) {
+        ThrowGraphError(ErrorCode::GraphSpecInvalid, "Unsupported schema_version");
+    }
 
     for (const auto& node : spec.at("nodes")) {
         std::string node_id = node.at("id").get<std::string>();
@@ -267,9 +300,7 @@ std::unique_ptr<GraphBuild> GraphBuild::FromJsonString(const std::string& conten
                 build->SetMethodOrder(node_id, order);
             }
             if (entry.contains("sync")) {
-                std::string method = entry.at("method").get<std::string>();
-                bool enabled = entry.at("sync").get<bool>();
-                build->SetMethodSync(node_id, method, enabled);
+                ThrowGraphError(ErrorCode::GraphSpecInvalid, "method_config.sync is no longer supported");
             }
             if (entry.contains("queue_size")) {
                 std::string method = entry.at("method").get<std::string>();

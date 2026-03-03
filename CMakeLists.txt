@@ -139,19 +139,6 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 if(NOT nlohmann_json_FOUND)
-    if(EXISTS "${CMAKE_SOURCE_DIR}/build/_deps/nlohmann_json-src/CMakeLists.txt")
-        add_subdirectory(
-            "${CMAKE_SOURCE_DIR}/build/_deps/nlohmann_json-src"
-            "${CMAKE_BINARY_DIR}/_deps/nlohmann_json-local-build"
-            EXCLUDE_FROM_ALL
-        )
-        if(TARGET nlohmann_json::nlohmann_json)
-            set(nlohmann_json_FOUND ON)
-        endif()
-    endif()
-endif()
-
-if(NOT nlohmann_json_FOUND)
     if(NOT EASYWORK_FETCH_DEPS)
         message(FATAL_ERROR "nlohmann_json not found and EASYWORK_FETCH_DEPS=OFF")
     endif()
@@ -217,18 +204,6 @@ if(EASYWORK_BUILD_PYTHON)
     endif()
 
     find_package(pybind11 QUIET)
-    if(NOT pybind11_FOUND)
-        if(EXISTS "${CMAKE_SOURCE_DIR}/build/_deps/pybind11-src/CMakeLists.txt")
-            add_subdirectory(
-                "${CMAKE_SOURCE_DIR}/build/_deps/pybind11-src"
-                "${CMAKE_BINARY_DIR}/_deps/pybind11-local-build"
-                EXCLUDE_FROM_ALL
-            )
-            if(TARGET pybind11::module)
-                set(pybind11_FOUND ON)
-            endif()
-        endif()
-    endif()
 
     if(NOT pybind11_FOUND)
         if(NOT EASYWORK_FETCH_DEPS)

@@ -31,7 +31,6 @@ public:
                      const std::unordered_map<int, std::string>& map);
 
     void SetMethodOrder(const std::string& node_id, const std::vector<std::string>& order);
-    void SetMethodSync(const std::string& node_id, const std::string& method, bool enabled);
     void SetMethodQueueSize(const std::string& node_id, const std::string& method, size_t max_queue);
 
     void Build();
